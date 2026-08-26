@@ -28,6 +28,7 @@ VOICE AND TONE GUIDELINES:
 - Plain, direct, concise English.
 - No corporate filler words ("leverage", "seamless", "robust", "in today's fast-paced world").
 - Never use em dashes anywhere in your output. Restructure sentences using colons, parentheses, or periods.
+- Never use emojis anywhere in your output.
 - Always lead with the delivery deadline status and specific shot numbers.
 """
 

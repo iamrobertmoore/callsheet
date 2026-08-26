@@ -24,11 +24,19 @@ async def test_health_and_state_endpoints():
         assert "shows" in data_state
         assert "nodes" in data_state
         assert len(data_state["nodes"]) == 12
+        assert "latest_mission" in data_state
+        assert data_state["latest_mission"] is not None
 
-        # Index HTML
+        # Producer Dashboard HTML
         res_html = await client.get("/")
         assert res_html.status_code == 200
         assert "Callsheet" in res_html.text
+        assert "Active Delivery Slate" in res_html.text
+
+        # Demo Harness HTML
+        res_demo = await client.get("/demo")
+        assert res_demo.status_code == 200
+        assert "Demonstration Control Surface" in res_demo.text
 
 
 @pytest.mark.asyncio

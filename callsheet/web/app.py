@@ -21,7 +21,6 @@ from callsheet.interventions.dispatcher import InterventionDispatcher
 
 # Global singleton instances
 simulator = RenderFarmSimulator()
-worker = FarmWorker(simulator=simulator, tick_interval_seconds=5.0)
 dispatcher = InterventionDispatcher(simulator=simulator)
 mission_runner = MultiStepMissionRunner(
     dispatcher=dispatcher,
@@ -29,11 +28,16 @@ mission_runner = MultiStepMissionRunner(
     location=os.getenv("VERTEX_AI_LOCATION", "global"),
     model_name="gemini-3.6-flash",
 )
+worker = FarmWorker(
+    simulator=simulator,
+    mission_runner=mission_runner,
+    tick_interval_seconds=5.0,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start continuous background farm emitter
+    # Start continuous background farm emitter and autonomous watchdog
     await worker.start()
     yield
     # Stop emitter on shutdown
@@ -43,7 +47,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Callsheet",
     description="Autonomous render pipeline agent for post-production delivery producers",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -76,7 +80,7 @@ async def health_check():
 
 @app.get("/api/state")
 async def get_farm_state():
-    """Returns the current state of shows, nodes, and active shots."""
+    """Returns the current state of shows, nodes, active shots, and latest mission."""
     state = simulator.state
     return {
         "active_scenario": state.active_scenario.value,
@@ -84,6 +88,8 @@ async def get_farm_state():
         "shows": {k: v.model_dump(mode="json") for k, v in state.shows.items()},
         "nodes": {k: v.model_dump(mode="json") for k, v in state.nodes.items()},
         "shots": {k: v.model_dump(mode="json") for k, v in state.shots.items()},
+        "latest_mission": worker.latest_mission,
+        "is_investigating": worker.is_investigating,
         "interventions_count": len(dispatcher.history),
     }
 
@@ -109,7 +115,8 @@ async def run_mission(req: MissionRequest):
     """Executes the 6-step observability to intervention mission."""
     try:
         result = await mission_runner.execute_mission(show_id=req.show_id or "show-aethelgard")
-        return result.model_dump(mode="json")
+        worker.latest_mission = result.model_dump(mode="json")
+        return worker.latest_mission
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
 
@@ -120,31 +127,33 @@ async def get_interventions():
     return [r.model_dump(mode="json") for r in dispatcher.list_history()]
 
 
-# Mount UI HTML
-UI_HTML = """<!DOCTYPE html>
+# Producer Surface (Main Interface)
+PRODUCER_UI_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Callsheet: Autonomous Operations Agent for Studio Crews</title>
+    <title>Callsheet: Autonomous Operations Agent for Studio Delivery Producers</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg: #0d1117;
-            --surface: #161b22;
-            --border: #30363d;
-            --text: #c9d1d9;
+            --bg: #090d13;
+            --surface: #121820;
+            --surface-subtle: #16202c;
+            --border: #232f3e;
+            --border-highlight: #34465d;
+            --text: #c2cbd6;
             --text-heading: #f0f6fc;
-            --accent: #58a6ff;
-            --accent-hover: #1f6feb;
+            --text-muted: #7d8b99;
+            --accent: #388bfd;
             --danger: #f85149;
-            --danger-bg: rgba(248, 81, 73, 0.15);
+            --danger-bg: rgba(248, 81, 73, 0.12);
             --warning: #d29922;
-            --warning-bg: rgba(210, 153, 34, 0.15);
+            --warning-bg: rgba(210, 153, 34, 0.12);
             --success: #3fb950;
-            --success-bg: rgba(63, 185, 80, 0.15);
+            --success-bg: rgba(63, 185, 80, 0.12);
             --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             --font-mono: 'JetBrains Mono', monospace;
         }
@@ -158,52 +167,74 @@ UI_HTML = """<!DOCTYPE html>
             padding: 24px;
         }
 
-        .container { max-width: 1200px; margin: 0 auto; }
+        .container { max-width: 1280px; margin: 0 auto; }
         
         header {
             display: flex;
             justify-content: space-between;
-            align-items: flex-start;
-            padding-bottom: 20px;
+            align-items: center;
+            padding-bottom: 18px;
             border-bottom: 1px solid var(--border);
             margin-bottom: 24px;
         }
 
         .brand h1 {
-            font-size: 24px;
+            font-size: 20px;
             font-weight: 700;
             color: var(--text-heading);
-            letter-spacing: -0.5px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
         }
 
         .brand p {
-            font-size: 14px;
-            color: #8b949e;
-            margin-top: 4px;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .utc-clock {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-muted);
+            background: var(--surface-subtle);
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
         }
 
         .status-badge {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 13px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
             font-weight: 600;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
         }
 
         .badge-live {
             background: var(--success-bg);
             color: var(--success);
-            border: 1px solid rgba(63, 185, 80, 0.4);
+            border: 1px solid rgba(63, 185, 80, 0.35);
+        }
+
+        .badge-investigating {
+            background: var(--warning-bg);
+            color: var(--warning);
+            border: 1px solid rgba(210, 153, 34, 0.35);
         }
 
         .badge-pulse {
-            width: 8px;
-            height: 8px;
+            width: 7px;
+            height: 7px;
             background: var(--success);
             border-radius: 50%;
             animation: pulse 2s infinite;
@@ -211,25 +242,117 @@ UI_HTML = """<!DOCTYPE html>
 
         @keyframes pulse {
             0% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.4; transform: scale(1.2); }
+            50% { opacity: 0.3; transform: scale(1.2); }
             100% { opacity: 1; transform: scale(1); }
         }
 
-        .grid {
+        /* Section Layout */
+        .section-title {
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.75px;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+
+        .slate-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .slate-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 16px;
+        }
+
+        .slate-card.critical {
+            border-left: 3px solid var(--accent);
+        }
+
+        .slate-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+
+        .show-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-heading);
+        }
+
+        .show-client {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 1px;
+        }
+
+        .state-tag {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 3px;
+            text-transform: uppercase;
+        }
+
+        .tag-protected {
+            background: var(--success-bg);
+            color: var(--success);
+            border: 1px solid rgba(63, 185, 80, 0.3);
+        }
+
+        .tag-scheduled {
+            background: var(--surface-subtle);
+            color: var(--accent);
+            border: 1px solid rgba(56, 139, 253, 0.3);
+        }
+
+        .slate-metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 10px;
+            font-size: 12px;
+        }
+
+        .metric-row span:first-child {
+            color: var(--text-muted);
+            display: block;
+            font-size: 11px;
+        }
+
+        .metric-row span:last-child {
+            font-family: var(--font-mono);
+            color: var(--text-heading);
+            font-weight: 500;
+        }
+
+        /* Two column main content */
+        .main-layout {
             display: grid;
             grid-template-columns: 2fr 1fr;
             gap: 24px;
             margin-bottom: 24px;
         }
 
-        @media (max-width: 900px) {
-            .grid { grid-template-columns: 1fr; }
+        @media (max-width: 960px) {
+            .main-layout { grid-template-columns: 1fr; }
         }
 
         .card {
             background: var(--surface);
             border: 1px solid var(--border);
-            border-radius: 8px;
+            border-radius: 6px;
             padding: 20px;
         }
 
@@ -238,38 +361,544 @@ UI_HTML = """<!DOCTYPE html>
             justify-content: space-between;
             align-items: center;
             margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border);
         }
 
-        .card-title {
-            font-size: 16px;
+        .card-heading {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-heading);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* Callsheet Report */
+        .briefing-content {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 18px;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .briefing-content h3 {
+            color: var(--text-heading);
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin: 16px 0 8px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 4px;
+        }
+
+        .briefing-content h3:first-child {
+            margin-top: 0;
+        }
+
+        .briefing-content p {
+            margin-bottom: 12px;
+            color: var(--text);
+        }
+
+        .briefing-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0;
+            font-size: 12px;
+            font-family: var(--font-mono);
+        }
+
+        .briefing-content th, .briefing-content td {
+            border: 1px solid var(--border);
+            padding: 8px 10px;
+            text-align: left;
+        }
+
+        .briefing-content th {
+            background: var(--surface-subtle);
+            color: var(--text-heading);
+            font-weight: 600;
+        }
+
+        .briefing-content ul {
+            padding-left: 18px;
+            margin-bottom: 12px;
+        }
+
+        .briefing-content li {
+            margin-bottom: 6px;
+        }
+
+        /* Expandable Reasoning Accordion */
+        details.trail-accordion {
+            background: var(--surface-subtle);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            margin-top: 16px;
+            padding: 12px 16px;
+        }
+
+        details.trail-accordion summary {
+            font-size: 12px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            color: var(--accent);
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .step-timeline {
+            margin-top: 14px;
+        }
+
+        .step-entry {
+            border-left: 2px solid var(--border-highlight);
+            padding-left: 14px;
+            margin-bottom: 14px;
+            position: relative;
+        }
+
+        .step-entry::before {
+            content: '';
+            position: absolute;
+            left: -5px;
+            top: 4px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent);
+        }
+
+        .step-title {
+            font-size: 12px;
             font-weight: 600;
             color: var(--text-heading);
         }
 
-        /* Controls */
-        .controls {
+        .step-desc {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .step-evidence {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            padding: 6px 10px;
+            border-radius: 3px;
+            margin-top: 6px;
+            color: var(--text);
+            word-break: break-all;
+        }
+
+        /* Fleet Grid */
+        .fleet-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+            gap: 8px;
+        }
+
+        .node-tile {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 10px 8px;
+            text-align: center;
+        }
+
+        .node-tile.throttled {
+            border-color: var(--danger);
+            background: var(--danger-bg);
+        }
+
+        .node-tile.standby {
+            border-style: dashed;
+            opacity: 0.75;
+        }
+
+        .node-id {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-heading);
+            font-family: var(--font-mono);
+        }
+
+        .node-temp {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            margin: 4px 0;
+        }
+
+        .node-shot {
+            font-size: 10px;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+        }
+
+        .footer-note {
+            text-align: center;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 32px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="brand">
+                <h1>Callsheet</h1>
+                <p>Autonomous Operations Agent for Post-Production Delivery Producers</p>
+            </div>
+            <div class="header-meta">
+                <div id="utc-clock" class="utc-clock">--:--:-- UTC</div>
+                <div id="agent-status-badge" class="status-badge badge-live">
+                    <span class="badge-pulse"></span>
+                    <span id="agent-status-text">Autonomous Watch Active</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Delivery Slate -->
+        <div class="section-title">Active Delivery Slate</div>
+        <div id="slate-container" class="slate-grid">
+            <div class="slate-card">Loading delivery slate...</div>
+        </div>
+
+        <!-- Main Workspace -->
+        <div class="main-layout">
+            <!-- Left: Callsheet Briefing & Audit -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-heading">Production Callsheet Briefing</span>
+                    <span id="briefing-timestamp" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">Synchronizing...</span>
+                </div>
+
+                <div id="briefing-container" class="briefing-content">
+                    Synchronizing latest delivery briefing from autonomous agent...
+                </div>
+
+                <details class="trail-accordion" open>
+                    <summary>Grafana Cloud MCP Evidence Trail & Telemetry Chain</summary>
+                    <div id="trail-container" class="step-timeline">
+                        <!-- Populated by JS -->
+                    </div>
+                </details>
+            </div>
+
+            <!-- Right: Fleet Hardware Grid -->
+            <div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-heading">Render Fleet Telemetry (12 Nodes)</span>
+                        <span id="fleet-summary" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">10 Active / 2 Standby</span>
+                    </div>
+                    <div id="fleet-container" class="fleet-grid">
+                        Loading node status...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer-note">
+            Callsheet Autonomous Post-Production Agent. Telemetry streamed continuously via OpenTelemetry OTLP to Grafana Cloud.
+        </div>
+    </div>
+
+    <script>
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('utc-clock').innerText = now.toUTCString().split(' ')[4] + ' UTC';
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        function formatMarkdown(text) {
+            if (!text) return '';
+            let html = text
+                .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+                .replace(/^## (.*$)/gim, '<h3>$1</h3>')
+                .replace(/^# (.*$)/gim, '<h3>$1</h3>')
+                .replace(/\\*\\*(.*?)\\*\\*/gim, '<strong>$1</strong>')
+                .replace(/\\*(.*?)\\*/gim, '<em>$1</em>');
+            
+            // Format tables
+            if (html.includes('|')) {
+                const lines = html.split('\\n');
+                let inTable = false;
+                let tableHtml = '<table>';
+                let formattedLines = [];
+
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i].trim();
+                    if (line.startsWith('|') && line.endsWith('|')) {
+                        if (line.includes(':---') || line.includes('---')) continue;
+                        if (!inTable) {
+                            inTable = true;
+                            tableHtml = '<table><thead><tr>' + line.split('|').filter(c => c.trim().length > 0).map(c => `<th>${c.trim()}</th>`).join('') + '</tr></thead><tbody>';
+                        } else {
+                            tableHtml += '<tr>' + line.split('|').filter(c => c.trim().length > 0).map(c => `<td>${c.trim()}</td>`).join('') + '</tr>';
+                        }
+                    } else {
+                        if (inTable) {
+                            tableHtml += '</tbody></table>';
+                            formattedLines.push(tableHtml);
+                            inTable = false;
+                        }
+                        formattedLines.push(line);
+                    }
+                }
+                if (inTable) {
+                    tableHtml += '</tbody></table>';
+                    formattedLines.push(tableHtml);
+                }
+                html = formattedLines.join('<br>');
+            }
+            return html;
+        }
+
+        async function fetchState() {
+            try {
+                const res = await fetch('/api/state');
+                const data = await res.json();
+
+                // Update Agent Status Badge
+                const badge = document.getElementById('agent-status-badge');
+                const badgeText = document.getElementById('agent-status-text');
+                if (data.is_investigating) {
+                    badge.className = 'status-badge badge-investigating';
+                    badgeText.innerText = 'Investigating Anomaly (MCP)';
+                } else {
+                    badge.className = 'status-badge badge-live';
+                    badgeText.innerText = 'Autonomous Watch Active';
+                }
+
+                // Render Delivery Slate
+                renderSlate(data.shows, data.latest_mission);
+
+                // Render Latest Mission Briefing
+                if (data.latest_mission) {
+                    renderBriefing(data.latest_mission);
+                    renderTrail(data.latest_mission.steps);
+                }
+
+                // Render Fleet Grid
+                renderFleet(data.nodes);
+
+            } catch (err) {
+                console.error("Failed to fetch farm state:", err);
+            }
+        }
+
+        function renderSlate(shows, latestMission) {
+            const container = document.getElementById('slate-container');
+            const showList = Object.values(shows);
+            if (!showList.length) return;
+
+            const isIntervened = latestMission && latestMission.intervention_record;
+
+            container.innerHTML = showList.map(s => {
+                let statusTag = '<span class="state-tag tag-scheduled">On Schedule</span>';
+                let bufferMargin = '+17.5 hours';
+
+                if (s.id === 'show-aethelgard' && isIntervened) {
+                    statusTag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>';
+                    bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 17.5).toFixed(1) + ' hours';
+                } else if (s.id === 'show-solar') {
+                    bufferMargin = '+24.0 hours';
+                } else if (s.id === 'show-abyssal') {
+                    bufferMargin = '+32.0 hours';
+                }
+
+                const deadlineFormatted = new Date(s.delivery_deadline).toUTCString().replace(':00 GMT', ' UTC');
+
+                return `
+                    <div class="slate-card ${s.critical_path ? 'critical' : ''}">
+                        <div class="slate-header">
+                            <div>
+                                <div class="show-title">${s.name}</div>
+                                <div class="show-client">${s.client}</div>
+                            </div>
+                            ${statusTag}
+                        </div>
+                        <div class="slate-metrics">
+                            <div class="metric-row">
+                                <span>Deadline</span>
+                                <span>${deadlineFormatted}</span>
+                            </div>
+                            <div class="metric-row">
+                                <span>Buffer Margin</span>
+                                <span style="color: var(--success);">${bufferMargin}</span>
+                            </div>
+                            <div class="metric-row">
+                                <span>Daily Penalty</span>
+                                <span>£${s.penalty_daily_amount.toLocaleString()} / day</span>
+                            </div>
+                            <div class="metric-row">
+                                <span>Priority Tier</span>
+                                <span>${s.critical_path ? 'Critical Path' : 'Standard'}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderBriefing(mission) {
+            const container = document.getElementById('briefing-container');
+            const timeLabel = document.getElementById('briefing-timestamp');
+
+            if (mission.timestamp) {
+                const dateObj = new Date(mission.timestamp);
+                timeLabel.innerText = 'Last updated ' + dateObj.toLocaleTimeString() + ' (' + dateObj.toDateString() + ')';
+            }
+
+            container.innerHTML = formatMarkdown(mission.callsheet_briefing);
+        }
+
+        function renderTrail(steps) {
+            const container = document.getElementById('trail-container');
+            if (!steps || !steps.length) {
+                container.innerHTML = '<div style="font-size: 12px; color: var(--text-muted);">No steps recorded.</div>';
+                return;
+            }
+
+            container.innerHTML = steps.map(step => {
+                let evidenceStr = '';
+                if (step.evidence) {
+                    evidenceStr = JSON.stringify(step.evidence, null, 2);
+                }
+
+                return `
+                    <div class="step-entry">
+                        <div class="step-title">Step ${step.step_number}: ${step.name}</div>
+                        <div class="step-desc">${step.description}</div>
+                        ${evidenceStr && evidenceStr !== '{}' ? `<div class="step-evidence">${evidenceStr}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderFleet(nodes) {
+            const container = document.getElementById('fleet-container');
+            const nodeList = Object.values(nodes);
+            if (!nodeList.length) return;
+
+            container.innerHTML = nodeList.map(n => {
+                let nodeClass = 'node-tile';
+                let tempColor = 'var(--success)';
+
+                if (n.status === 'THROTTLED' || n.temperature_celsius > 90) {
+                    nodeClass += ' throttled';
+                    tempColor = 'var(--danger)';
+                } else if (n.is_standby) {
+                    nodeClass += ' standby';
+                    tempColor = 'var(--text-muted)';
+                }
+
+                let shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : (n.is_standby ? 'Standby Spare' : 'Idle');
+
+                return `
+                    <div class="${nodeClass}">
+                        <div class="node-id">${n.id}</div>
+                        <div class="node-temp" style="color: ${tempColor};">${n.temperature_celsius.toFixed(1)}°C</div>
+                        <div class="node-shot">${shotLabel}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Poll state every 3 seconds
+        setInterval(fetchState, 3000);
+        fetchState();
+    </script>
+</body>
+</html>
+"""
+
+# Demonstration & Scenario Injection Surface (Isolated on /demo)
+DEMO_UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Callsheet: Demo Control & Fault Injection Harness</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #090d13;
+            --surface: #121820;
+            --border: #232f3e;
+            --text: #c2cbd6;
+            --text-heading: #f0f6fc;
+            --text-muted: #7d8b99;
+            --accent: #388bfd;
+            --danger: #f85149;
+            --danger-bg: rgba(248, 81, 73, 0.15);
+            --warning: #d29922;
+            --warning-bg: rgba(210, 153, 34, 0.15);
+            --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: var(--font-main);
+            padding: 24px;
+        }
+
+        .container { max-width: 900px; margin: 0 auto; }
+        
+        .demo-notice {
+            background: var(--warning-bg);
+            border: 1px solid var(--warning);
+            color: #e3b341;
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 24px;
+            font-size: 13px;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        h1 { font-size: 20px; color: var(--text-heading); margin-bottom: 8px; }
+        p { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
+
+        .btn-group {
             display: flex;
             gap: 12px;
-            margin-bottom: 24px;
             flex-wrap: wrap;
         }
 
         button {
             font-family: var(--font-main);
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 600;
             padding: 10px 16px;
-            border-radius: 6px;
+            border-radius: 4px;
             border: 1px solid transparent;
             cursor: pointer;
             transition: all 0.15s ease;
         }
-
-        .btn-primary {
-            background: #238636;
-            color: #ffffff;
-        }
-        .btn-primary:hover { background: #2ea043; }
 
         .btn-danger {
             background: var(--danger-bg);
@@ -279,290 +908,94 @@ UI_HTML = """<!DOCTYPE html>
         .btn-danger:hover { background: rgba(248, 81, 73, 0.3); }
 
         .btn-secondary {
-            background: #21262d;
+            background: #1c2430;
             color: var(--text-heading);
             border-color: var(--border);
         }
-        .btn-secondary:hover { background: #30363d; }
+        .btn-secondary:hover { background: #2a3545; }
 
-        /* Shows & Deadlines */
-        .show-item {
-            padding: 12px;
-            background: #0d1117;
+        .btn-primary {
+            background: #238636;
+            color: #ffffff;
+        }
+        .btn-primary:hover { background: #2ea043; }
+
+        .log-box {
+            background: #05080c;
             border: 1px solid var(--border);
-            border-radius: 6px;
-            margin-bottom: 10px;
-        }
-
-        .show-header {
-            display: flex;
-            justify-content: space-between;
-            font-weight: 600;
-            color: var(--text-heading);
-        }
-
-        .show-meta {
-            display: flex;
-            justify-content: space-between;
-            font-size: 13px;
-            color: #8b949e;
-            margin-top: 4px;
-        }
-
-        /* Node Farm Grid */
-        .nodes-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-            gap: 10px;
-        }
-
-        .node-box {
-            background: #0d1117;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 10px;
-            text-align: center;
-        }
-
-        .node-name { font-size: 13px; font-weight: 600; color: var(--text-heading); }
-        .node-temp { font-family: var(--font-mono); font-size: 13px; margin: 4px 0; }
-        .node-shot { font-size: 11px; color: #8b949e; }
-
-        .status-healthy { border-color: var(--success); }
-        .status-throttled { border-color: var(--danger); background: var(--danger-bg); }
-        .status-standby { border-color: #8b949e; opacity: 0.7; }
-
-        /* Callsheet Report */
-        .briefing-box {
-            background: #090d13;
-            border: 1px solid var(--border);
-            border-left: 4px solid var(--accent);
-            border-radius: 6px;
-            padding: 20px;
-            font-size: 14px;
-            white-space: pre-wrap;
-            font-family: var(--font-main);
-        }
-
-        .briefing-box h2, .briefing-box h3 {
-            color: var(--text-heading);
-            margin: 14px 0 8px;
-            font-size: 16px;
-        }
-
-        .briefing-box table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 12px 0;
-            font-size: 13px;
-        }
-
-        .briefing-box th, .briefing-box td {
-            border: 1px solid var(--border);
-            padding: 8px 12px;
-            text-align: left;
-        }
-
-        .briefing-box th {
-            background: #161b22;
-            color: var(--text-heading);
-        }
-
-        /* Reasoning Trail */
-        .step-timeline {
-            margin-top: 16px;
-        }
-
-        .step-card {
-            border-left: 2px solid var(--accent);
-            padding-left: 16px;
-            margin-bottom: 16px;
-            position: relative;
-        }
-
-        .step-card::before {
-            content: '';
-            position: absolute;
-            left: -6px;
-            top: 4px;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: var(--accent);
-        }
-
-        .step-title {
-            font-weight: 600;
-            color: var(--text-heading);
-            font-size: 14px;
-        }
-
-        .step-desc {
-            font-size: 13px;
-            color: #8b949e;
-            margin-top: 2px;
-        }
-
-        .step-code {
+            border-radius: 4px;
+            padding: 14px;
             font-family: var(--font-mono);
             font-size: 12px;
-            background: #090d13;
-            padding: 8px 12px;
-            border-radius: 4px;
-            margin-top: 6px;
             color: #58a6ff;
-            word-break: break-all;
+            height: 220px;
+            overflow-y: auto;
         }
+
+        a { color: var(--accent); text-decoration: none; font-size: 13px; }
+        a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
     <div class="container">
-        <header>
-            <div class="brand">
-                <h1>Callsheet</h1>
-                <p>Autonomous Operations Agent for Post-Production Delivery Producers (Studio Crews)</p>
-            </div>
-            <div class="status-badge badge-live">
-                <span class="badge-pulse"></span>
-                <span>Grafana Cloud MCP Connected</span>
-            </div>
-        </header>
-
-        <div class="controls">
-            <button class="btn-primary" onclick="runInvestigation()">⚡ Investigate & Intervene</button>
-            <button class="btn-danger" onclick="injectScenario('THERMAL_THROTTLING')">🔥 Inject Scenario: Node 07 Thermal Throttle</button>
-            <button class="btn-secondary" onclick="injectScenario('BASELINE')">↺ Restore Baseline</button>
+        <div class="demo-notice">
+            <strong>Demonstration Control Surface:</strong> This route is isolated for recording evaluation videos and manual scenario fault injection. The main product surface is at <a href="/">/ (Producer Dashboard)</a>.
         </div>
 
-        <div class="grid">
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">Production Callsheet Briefing</span>
-                    <span id="briefing-time" style="font-size: 12px; color: #8b949e;">Waiting for agent mission...</span>
-                </div>
-                <div id="briefing-container" class="briefing-box">
-Click <strong>"Investigate & Intervene"</strong> to trigger the multi-step reasoning agent. The agent will inspect Prometheus telemetry via Grafana Cloud MCP, correlate Loki logs and Tempo traces, execute automated shot reallocations to protect contractual delivery deadlines, and generate the producer summary here.
-                </div>
+        <div class="card">
+            <h1>Fault Injection & Scenario Controls</h1>
+            <p>Inject synthetic hardware degradation scenarios into the running render farm or trigger manual mission executions.</p>
 
-                <div style="margin-top: 24px;">
-                    <div class="card-title">Grafana MCP Reasoning Trail & Evidence Chain</div>
-                    <div id="steps-container" class="step-timeline">
-                        <div style="font-size: 13px; color: #8b949e; padding: 12px 0;">No active mission running. Intermediate Grafana telemetry evidence will populate here during execution.</div>
-                    </div>
-                </div>
+            <div class="btn-group">
+                <button class="btn-danger" onclick="injectScenario('THERMAL_THROTTLING')">Inject Scenario: Node-07 Thermal Throttling</button>
+                <button class="btn-secondary" onclick="injectScenario('MEMORY_LEAK_OOM')">Inject Scenario: Memory Leak (OOM)</button>
+                <button class="btn-secondary" onclick="injectScenario('BASELINE')">Restore Baseline Operations</button>
+                <button class="btn-primary" onclick="runManualMission()">Trigger Manual Agent Mission</button>
             </div>
+        </div>
 
-            <div>
-                <div class="card" style="margin-bottom: 24px;">
-                    <div class="card-header">
-                        <span class="card-title">Shows & Delivery Deadlines</span>
-                    </div>
-                    <div id="shows-container">Loading shows...</div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <span class="card-title">Render Farm Telemetry (12 Nodes)</span>
-                    </div>
-                    <div id="nodes-container" class="nodes-grid">Loading farm nodes...</div>
-                </div>
-            </div>
+        <div class="card">
+            <h1>Harness Activity Log</h1>
+            <div id="log-box" class="log-box">Harness ready. Telemetry worker active.</div>
         </div>
     </div>
 
     <script>
-        async function fetchState() {
-            try {
-                const res = await fetch('/api/state');
-                const data = await res.json();
-                renderShows(data.shows);
-                renderNodes(data.nodes);
-            } catch (err) {
-                console.error("State fetch error:", err);
-            }
-        }
-
-        function renderShows(shows) {
-            const container = document.getElementById('shows-container');
-            container.innerHTML = Object.values(shows).map(s => `
-                <div class="show-item">
-                    <div class="show-header">
-                        <span>${s.name}</span>
-                        <span style="color: ${s.critical_path ? '#f85149' : '#58a6ff'}; font-size: 12px;">${s.critical_path ? 'CRITICAL PATH' : 'STANDARD'}</span>
-                    </div>
-                    <div class="show-meta">
-                        <span>Client: ${s.client}</span>
-                        <span>Penalty: £${s.penalty_daily_amount.toLocaleString()}/day</span>
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        function renderNodes(nodes) {
-            const container = document.getElementById('nodes-container');
-            container.innerHTML = Object.values(nodes).map(n => {
-                let statusClass = 'status-healthy';
-                if (n.status === 'THROTTLED') statusClass = 'status-throttled';
-                if (n.is_standby) statusClass = 'status-standby';
-                
-                return `
-                    <div class="node-box ${statusClass}">
-                        <div class="node-name">${n.id}</div>
-                        <div class="node-temp" style="color: ${n.temperature_celsius > 90 ? '#f85149' : '#3fb950'}">${n.temperature_celsius.toFixed(1)}°C</div>
-                        <div class="node-shot">${n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : (n.is_standby ? 'Standby' : 'Idle')}</div>
-                    </div>
-                `;
-            }).join('');
+        function log(msg) {
+            const box = document.getElementById('log-box');
+            const time = new Date().toLocaleTimeString();
+            box.innerHTML = `[${time}] ${msg}<br>` + box.innerHTML;
         }
 
         async function injectScenario(scenario) {
-            await fetch('/api/scenario', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ scenario: scenario })
-            });
-            fetchState();
+            log(`Injecting scenario: ${scenario}...`);
+            try {
+                const res = await fetch('/api/scenario', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ scenario: scenario })
+                });
+                const data = await res.json();
+                log(`Scenario active: ${data.scenario}. Watchdog will detect and intervene automatically.`);
+            } catch (err) {
+                log(`Error injecting scenario: ${err}`);
+            }
         }
 
-        async function runInvestigation() {
-            const briefingBox = document.getElementById('briefing-container');
-            const stepsBox = document.getElementById('steps-container');
-            const timeLabel = document.getElementById('briefing-time');
-
-            briefingBox.innerHTML = '<em>Executing multi-step reasoning mission across Grafana Cloud MCP (Prometheus, Loki, Tempo) and Vertex AI Gemini...</em>';
-            stepsBox.innerHTML = '<div style="color: #58a6ff;">Mission in progress: querying MCP tools...</div>';
-
+        async function runManualMission() {
+            log('Triggering manual 6-step mission across Prometheus, Loki, Tempo, and Vertex AI...');
             try {
                 const res = await fetch('/api/mission', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ show_id: 'show-aethelgard' })
                 });
-                const result = await res.json();
-
-                timeLabel.innerText = 'Generated ' + new Date(result.timestamp).toLocaleTimeString();
-                briefingBox.innerHTML = result.callsheet_briefing
-                    .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
-                    .replace(/\\*(.*?)\\*/g, '<em>$1</em>');
-
-                // Render intermediate reasoning steps
-                stepsBox.innerHTML = result.steps.map(step => `
-                    <div class="step-card">
-                        <div class="step-title">Step ${step.step_number}: ${step.name}</div>
-                        <div class="step-desc">${step.description}</div>
-                        ${step.evidence.tool ? `<div class="step-code">Tool: ${step.evidence.tool} | ${JSON.stringify(step.evidence.expr || step.evidence.logql || '')}</div>` : ''}
-                    </div>
-                `).join('');
-
-                fetchState();
+                const data = await res.json();
+                log(`Mission complete: ${data.anomaly_detected} -> Intervention: ${data.intervention_record ? data.intervention_record.status : 'None'}`);
             } catch (err) {
-                briefingBox.innerText = 'Error executing mission: ' + err;
+                log(`Mission error: ${err}`);
             }
         }
-
-        // Poll state every 4 seconds
-        setInterval(fetchState, 4000);
-        fetchState();
     </script>
 </body>
 </html>
@@ -570,5 +1003,10 @@ Click <strong>"Investigate & Intervene"</strong> to trigger the multi-step reaso
 
 
 @app.get("/", response_class=HTMLResponse)
-async def get_index():
-    return UI_HTML
+async def get_producer_dashboard():
+    return PRODUCER_UI_HTML
+
+
+@app.get("/demo", response_class=HTMLResponse)
+async def get_demo_harness():
+    return DEMO_UI_HTML
