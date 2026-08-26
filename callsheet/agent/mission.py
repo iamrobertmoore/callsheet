@@ -8,6 +8,7 @@ intervention summaries using Vertex AI Gemini.
 from datetime import datetime, timezone
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
 import uuid
 from pydantic import BaseModel, Field
@@ -69,8 +70,8 @@ class MultiStepMissionRunner:
         dispatcher: InterventionDispatcher,
         mcp_server_url: Optional[str] = None,
         project_id: str = "agent-attest-2026",
-        location: str = "us-central1",
-        model_name: str = "gemini-2.5-flash",
+        location: str = "global",
+        model_name: str = "gemini-3.6-flash",
     ):
         self.dispatcher = dispatcher
         self.mcp_server_url = mcp_server_url
@@ -114,8 +115,8 @@ class MultiStepMissionRunner:
         """
         Runs the complete 6-step mission strictly driven by Grafana Cloud MCP responses:
         1. Anomaly Detection (Prometheus response parsing)
-        2. Signal Correlation (Loki Logs & Tempo Traces response parsing)
-        3. Root Cause Deduction (Vertex AI Gemini reasoning over retrieved data)
+        2. Signal Correlation (Loki Logs & Tempo Trace Spans response parsing)
+        3. Root Cause Deduction (Vertex AI Gemini reasoning over retrieved signals)
         4. Production Impact Calculation
         5. Workload Reallocation Intervention
         6. Producer Callsheet Briefing Generation (Vertex AI Gemini)
@@ -182,7 +183,7 @@ class MultiStepMissionRunner:
         steps.append(step1)
 
         # ---------------------------------------------------------
-        # STEP 2: SIGNAL CORRELATION (Parse Loki Logs & Tempo Traces)
+        # STEP 2: SIGNAL CORRELATION (Parse Loki Logs & Tempo Trace Spans)
         # ---------------------------------------------------------
         # 2a. Query Loki logs
         loki_data = await self._execute_mcp_tool(
@@ -199,7 +200,7 @@ class MultiStepMissionRunner:
 
         log_entries = loki_data.get("data", [])
         if not log_entries:
-            # Fallback to service log stream
+            # Query general service logs
             loki_data = await self._execute_mcp_tool(
                 toolset,
                 "query_loki_logs",
@@ -219,31 +220,75 @@ class MultiStepMissionRunner:
         retrieved_log_lines = [entry.get("line", "") for entry in log_entries]
         quoted_log_evidence = retrieved_log_lines[0] if retrieved_log_lines else "No log body"
 
-        # 2b. Query Tempo traces via Grafana API proxy
+        # 2b. Query Tempo traces via Grafana proxy with time bounds
+        now_epoch = int(time.time())
+        start_epoch = now_epoch - 7200
+
         tempo_search = await self._execute_mcp_tool(
             toolset,
             "grafana_api_request",
             {
-                "endpoint": "/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=service.name%3Drender-farm&limit=5",
+                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?start={start_epoch}&end={now_epoch}&limit=10",
                 "method": "GET",
             }
         )
 
         tempo_data = tempo_search.get("data", {})
         traces_list = tempo_data.get("traces", [])
-        tempo_status = tempo_search.get("status", 200)
+        if not traces_list and "traces" in tempo_search:
+            traces_list = tempo_search.get("traces", [])
+
+        if not traces_list:
+            raise RuntimeError(f"Step 2 failed: No trace spans returned from Tempo in Grafana Cloud across {start_epoch}-{now_epoch}.")
+
+        # Retrieve detailed span timings for the first trace
+        first_trace = traces_list[0]
+        trace_id = first_trace.get("traceID")
+        root_trace_name = first_trace.get("rootTraceName", "unknown")
+        total_duration_ms = first_trace.get("durationMs", 0)
+
+        trace_detail = await self._execute_mcp_tool(
+            toolset,
+            "grafana_api_request",
+            {
+                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/traces/{trace_id}",
+                "method": "GET",
+            }
+        )
+
+        # Parse child spans from Tempo detail payload
+        child_spans = []
+        batches = trace_detail.get("data", {}).get("batches", [])
+        for b in batches:
+            for scope in b.get("scopeSpans", []):
+                for s in scope.get("spans", []):
+                    span_name = s.get("name", "")
+                    start_ns = int(s.get("startTimeUnixNano", 0))
+                    end_ns = int(s.get("endTimeUnixNano", 0))
+                    dur_sec = (end_ns - start_ns) / 1e9 if end_ns > start_ns else 0.0
+                    child_spans.append({
+                        "name": span_name,
+                        "duration_seconds": round(dur_sec, 2),
+                    })
+
+        quoted_trace_evidence = (
+            f"TraceID {trace_id} ({root_trace_name}): Total Duration {total_duration_ms}ms. "
+            f"Child Spans: {json.dumps(child_spans[:4])}"
+        )
 
         step2 = MissionStep(
             step_number=2,
             name="Signal Correlation (Loki & Tempo)",
-            description=f"Correlated Prometheus anomaly with Loki worker logs and Tempo trace search on {anomalous_node_id}.",
+            description=f"Correlated Prometheus anomaly with Loki worker logs and Tempo trace spans on {anomalous_node_id}.",
             evidence={
                 "tool_logs": "query_loki_logs",
                 "quoted_loki_log": quoted_log_evidence,
                 "total_logs_retrieved": len(retrieved_log_lines),
-                "tool_traces": "grafana_api_request (/api/datasources/proxy/uid/grafanacloud-traces/api/search)",
-                "tempo_status": tempo_status,
-                "tempo_traces_found": len(traces_list),
+                "tool_traces": f"grafana_api_request (/api/datasources/proxy/uid/grafanacloud-traces/api/traces/{trace_id})",
+                "trace_id": trace_id,
+                "root_trace_name": root_trace_name,
+                "quoted_trace_span": quoted_trace_evidence,
+                "spans_breakdown": child_spans,
             },
         )
         steps.append(step2)
@@ -255,7 +300,7 @@ class MultiStepMissionRunner:
 Analyze the following retrieved observability signals from Grafana Cloud for render node {anomalous_node_id}:
 - Prometheus Temperature Metric: {max_temp:.1f}°C (Threshold: 90.0°C)
 - Loki Log Records: {json.dumps(retrieved_log_lines[:3])}
-- Tempo Trace Search Status: {tempo_status} (Traces indexed: {len(traces_list)})
+- Tempo Trace Span Timings: {quoted_trace_evidence}
 
 State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
 """
@@ -348,7 +393,7 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
                 "target_node": chosen_standby_node,
                 "source_temp": max_temp,
                 "quoted_loki_log": quoted_log_evidence,
-                "tempo_search_status": tempo_status,
+                "quoted_tempo_trace": quoted_trace_evidence,
             },
         )
 
@@ -383,7 +428,7 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
             root_cause=deduced_root_cause,
             metric_evidence=f"render_farm_node_temperature_celsius on {anomalous_node_id} reached {max_temp:.1f}°C",
             log_evidence=f"Loki log: {quoted_log_evidence}",
-            trace_evidence=f"Tempo raytrace span duration increased to {throttled_sec_per_frame:.0f}s per frame on {anomalous_node_id}",
+            trace_evidence=f"Tempo raytrace span: {quoted_trace_evidence}",
             intervention_taken=f"Shot {target_shot.shot_code} moved to standby node {chosen_standby_node}; restored normal render rate",
             projected_buffer=f"+{intervention_record.buffer_margin_hours:.1f} hours margin before deadline",
         )

@@ -85,8 +85,8 @@ async def test_full_six_step_mission_against_live_grafana():
             dispatcher=dispatcher,
             mcp_server_url=server_url,
             project_id="agent-attest-2026",
-            location="us-central1",
-            model_name="gemini-2.5-flash",
+            location="global",
+            model_name="gemini-3.6-flash",
         )
 
         result = await runner.execute_mission(show_id="show-aethelgard")
@@ -132,8 +132,8 @@ async def test_mission_fails_when_grafana_unreachable():
         dispatcher=dispatcher,
         mcp_server_url=dead_server_url,
         project_id="agent-attest-2026",
-        location="us-central1",
-        model_name="gemini-2.5-flash",
+        location="global",
+        model_name="gemini-3.6-flash",
     )
 
     with pytest.raises((ConnectionError, RuntimeError)) as excinfo:

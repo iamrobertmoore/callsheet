@@ -2,6 +2,8 @@
 
 When a render node degrades at 2 AM, Callsheet tells the delivery producer whether Tuesday's delivery will land on time or cost money. Most observability tools alert the engineer who built the farm; Callsheet protects the delivery producer who is accountable for the date.
 
+Without Grafana, Callsheet would be a post-mortem tool that tells you why you missed the deadline after the money is already lost.
+
 Callsheet is an autonomous operations agent designed for the delivery producer at a boutique post-production studio (studio crews). When render nodes degrade, Callsheet connects directly to Grafana Cloud over the Model Context Protocol (MCP) to correlate metrics, logs, and traces, isolate the root cause, reallocate affected shots to protect contractual delivery deadlines, and explain the situation in plain production language.
 
 ## Who This Is For
