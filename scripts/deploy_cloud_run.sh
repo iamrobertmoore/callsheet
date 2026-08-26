@@ -46,7 +46,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --max-instances 2 \
     --no-cpu-throttling \
     --memory 512Mi \
-    --cpu 1 \
+    --cpu 0.5 \
     --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GRAFANA_URL=${GRAFANA_URL},GRAFANA_MCP_SERVER_URL=http://127.0.0.1:8000/mcp,OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT},OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS}" \
     --set-secrets "GRAFANA_SERVICE_ACCOUNT_TOKEN=${SECRET_NAME}:latest"
 

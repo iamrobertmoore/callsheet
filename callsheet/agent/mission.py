@@ -1,7 +1,8 @@
 """
 Multi-step reasoning mission runner for Callsheet.
 Executes genuine, load-bearing observability investigations against Grafana Cloud MCP
-and generates producer-facing intervention summaries using Vertex AI Gemini.
+(Prometheus metrics, Loki logs, and Tempo traces) and generates producer-facing
+intervention summaries using Vertex AI Gemini.
 """
 
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from callsheet.agent.prompts import (
     CALLSHEET_AGENT_SYSTEM_PROMPT,
     CALLSHEET_SUMMARY_PROMPT_TEMPLATE,
 )
+from callsheet.farm.models import NodeStatus
 from callsheet.interventions.dispatcher import (
     InterventionDispatcher,
     InterventionRecord,
@@ -57,8 +59,9 @@ class MissionResult(BaseModel):
 
 class MultiStepMissionRunner:
     """
-    Executes load-bearing multi-step observability investigations against Grafana Cloud MCP
-    and generates producer-facing intervention summaries using Vertex AI Gemini.
+    Executes load-bearing multi-step observability investigations across Prometheus, Loki,
+    and Tempo via Grafana Cloud MCP, and generates producer-facing intervention summaries
+    using Vertex AI Gemini.
     """
 
     def __init__(
@@ -181,6 +184,7 @@ class MultiStepMissionRunner:
         # ---------------------------------------------------------
         # STEP 2: SIGNAL CORRELATION (Parse Loki Logs & Tempo Traces)
         # ---------------------------------------------------------
+        # 2a. Query Loki logs
         loki_data = await self._execute_mcp_tool(
             toolset,
             "query_loki_logs",
@@ -195,7 +199,7 @@ class MultiStepMissionRunner:
 
         log_entries = loki_data.get("data", [])
         if not log_entries:
-            # If no node-specific stream, query service logs
+            # Fallback to service log stream
             loki_data = await self._execute_mcp_tool(
                 toolset,
                 "query_loki_logs",
@@ -212,31 +216,34 @@ class MultiStepMissionRunner:
         if not log_entries:
             raise RuntimeError(f"Step 2 failed: No corresponding log entries found in Loki for node {anomalous_node_id}.")
 
-        # Extract actual log lines returned from Loki
         retrieved_log_lines = [entry.get("line", "") for entry in log_entries]
         quoted_log_evidence = retrieved_log_lines[0] if retrieved_log_lines else "No log body"
 
-        # Query frame duration distribution for the anomalous node
-        prom_hist = await self._execute_mcp_tool(
+        # 2b. Query Tempo traces via Grafana API proxy
+        tempo_search = await self._execute_mcp_tool(
             toolset,
-            "query_prometheus",
+            "grafana_api_request",
             {
-                "datasourceUid": "grafanacloud-prom",
-                "expr": f'render_farm_frame_duration_seconds_sum{{node_id="{anomalous_node_id}"}} / render_farm_frame_duration_seconds_count{{node_id="{anomalous_node_id}"}}',
-                "queryType": "instant",
-                "endTime": "now",
+                "endpoint": "/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=service.name%3Drender-farm&limit=5",
+                "method": "GET",
             }
         )
+
+        tempo_data = tempo_search.get("data", {})
+        traces_list = tempo_data.get("traces", [])
+        tempo_status = tempo_search.get("status", 200)
 
         step2 = MissionStep(
             step_number=2,
             name="Signal Correlation (Loki & Tempo)",
-            description=f"Correlated Prometheus anomaly with Loki worker logs and Tempo trace timings on {anomalous_node_id}.",
+            description=f"Correlated Prometheus anomaly with Loki worker logs and Tempo trace search on {anomalous_node_id}.",
             evidence={
                 "tool_logs": "query_loki_logs",
                 "quoted_loki_log": quoted_log_evidence,
                 "total_logs_retrieved": len(retrieved_log_lines),
-                "trace_timing_query": prom_hist.get("data", []),
+                "tool_traces": "grafana_api_request (/api/datasources/proxy/uid/grafanacloud-traces/api/search)",
+                "tempo_status": tempo_status,
+                "tempo_traces_found": len(traces_list),
             },
         )
         steps.append(step2)
@@ -248,6 +255,7 @@ class MultiStepMissionRunner:
 Analyze the following retrieved observability signals from Grafana Cloud for render node {anomalous_node_id}:
 - Prometheus Temperature Metric: {max_temp:.1f}°C (Threshold: 90.0°C)
 - Loki Log Records: {json.dumps(retrieved_log_lines[:3])}
+- Tempo Trace Search Status: {tempo_status} (Traces indexed: {len(traces_list)})
 
 State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
 """
@@ -259,10 +267,11 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
                 temperature=0.1,
             ),
         )
-        deduced_root_cause = root_cause_response.text.strip() if root_cause_response.text else (
-            f"Cooling failure on {anomalous_node_id} drove die temperature to {max_temp:.1f}°C, "
-            "triggering hardware thermal down-throttling."
-        )
+        
+        if not root_cause_response or not root_cause_response.text or not root_cause_response.text.strip():
+            raise RuntimeError(f"Step 3 failed: Vertex AI Gemini reasoning model ({self.model_name}) returned empty diagnosis.")
+
+        deduced_root_cause = root_cause_response.text.strip()
 
         step3 = MissionStep(
             step_number=3,
@@ -319,18 +328,27 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
         steps.append(step4)
 
         # ---------------------------------------------------------
-        # STEP 5: WORKLOAD REALLOCATION INTERVENTION
+        # STEP 5: WORKLOAD REALLOCATION INTERVENTION (Dynamic Standby Selection)
         # ---------------------------------------------------------
-        standby_node = "node-12"
+        available_standby_nodes = [
+            n for n in self.dispatcher.simulator.state.nodes.values()
+            if n.is_standby and n.status == NodeStatus.STANDBY
+        ]
+        if not available_standby_nodes:
+            raise RuntimeError("Step 5 failed: No standby spare nodes available for workload reallocation.")
+
+        chosen_standby_node = available_standby_nodes[0].id
+
         intervention_record = self.dispatcher.execute_reallocation(
             shot_id=target_shot.id,
-            target_node_id=standby_node,
+            target_node_id=chosen_standby_node,
             reason=f"Automated failover from throttled {anomalous_node_id} ({max_temp:.1f}°C) to protect {show_name} deadline.",
             telemetry_evidence={
                 "source_node": anomalous_node_id,
-                "target_node": standby_node,
+                "target_node": chosen_standby_node,
                 "source_temp": max_temp,
                 "quoted_loki_log": quoted_log_evidence,
+                "tempo_search_status": tempo_status,
             },
         )
 
@@ -338,7 +356,7 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
             step_number=5,
             name="Workload Reallocation Intervention",
             description=(
-                f"Reallocated Shot {target_shot.shot_code} from {anomalous_node_id} to standby spare {standby_node}. "
+                f"Reallocated Shot {target_shot.shot_code} from {anomalous_node_id} to standby spare {chosen_standby_node}. "
                 f"Clean render speed restored. Positive buffer margin: +{intervention_record.buffer_margin_hours:.1f} hours."
             ),
             evidence={
@@ -366,7 +384,7 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
             metric_evidence=f"render_farm_node_temperature_celsius on {anomalous_node_id} reached {max_temp:.1f}°C",
             log_evidence=f"Loki log: {quoted_log_evidence}",
             trace_evidence=f"Tempo raytrace span duration increased to {throttled_sec_per_frame:.0f}s per frame on {anomalous_node_id}",
-            intervention_taken=f"Shot {target_shot.shot_code} moved to standby node {standby_node}; restored 20s render rate",
+            intervention_taken=f"Shot {target_shot.shot_code} moved to standby node {chosen_standby_node}; restored normal render rate",
             projected_buffer=f"+{intervention_record.buffer_margin_hours:.1f} hours margin before deadline",
         )
 
@@ -378,7 +396,10 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
                 temperature=0.2,
             ),
         )
-        briefing_text = response.text.strip() if response.text else "Briefing generation returned empty."
+        if not response or not response.text or not response.text.strip():
+            raise RuntimeError(f"Step 6 failed: Vertex AI Gemini ({self.model_name}) returned empty briefing text.")
+
+        briefing_text = response.text.strip()
 
         step6 = MissionStep(
             step_number=6,
