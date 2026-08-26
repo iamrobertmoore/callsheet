@@ -30,6 +30,13 @@ else
     echo -n "$GRAFANA_SERVICE_ACCOUNT_TOKEN" | gcloud secrets versions add "$SECRET_NAME" --data-file=- --project "$PROJECT_ID" --quiet || true
 fi
 
+# Ensure Cloud Run service account has access to secret
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+gcloud secrets add-iam-policy-binding "$SECRET_NAME" \
+    --project "$PROJECT_ID" \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor" --quiet >/dev/null 2>&1 || true
+
 # 2. Build and submit container image via Cloud Build
 echo "Submitting build to Cloud Build..."
 gcloud builds submit --project "$PROJECT_ID" --tag "gcr.io/${PROJECT_ID}/${SERVICE_NAME}:latest" --quiet .
