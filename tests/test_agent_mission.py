@@ -33,8 +33,8 @@ async def test_full_six_step_mission_against_live_grafana():
     emitter = FarmTelemetryEmitter(sim)
 
     # Emit telemetry into Grafana Cloud
-    emitter.emit_metrics_tick()
     events = sim.tick(delta_seconds=30.0)
+    emitter.emit_metrics_tick()
     emitter.process_events(events)
     emitter.emit_log(
         "CRITICAL: Thermal junction temperature on node-07 reached 94.5C. Render task for shot 118 throttled.",
