@@ -35,9 +35,9 @@ async def test_full_six_step_mission_against_live_grafana():
     # Emit telemetry into Grafana Cloud
     events = sim.tick(delta_seconds=30.0)
     emitter.emit_metrics_tick()
-    emitter.process_events(events)
+    node7_temp = sim.state.nodes["node-07"].temperature_celsius
     emitter.emit_log(
-        "CRITICAL: Thermal junction temperature on node-07 reached 94.7C. Render task for shot 118 throttled.",
+        f"CRITICAL: Thermal junction temperature on node-07 reached {node7_temp:.1f}C (threshold: 90.0C). Hardware clock down-throttled to 800MHz.",
         level="WARN",
         node_id="node-07",
         shot_code="118",

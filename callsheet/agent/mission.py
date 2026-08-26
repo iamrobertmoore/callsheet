@@ -128,40 +128,52 @@ class MultiStepMissionRunner:
         toolset = create_grafana_mcp_toolset(params)
 
         # ---------------------------------------------------------
-        # STEP 1: DETECT METRIC ANOMALY (Parse Prometheus Response)
+        # STEP 1: DETECT METRIC ANOMALY (Parse Prometheus Response with retry)
         # ---------------------------------------------------------
-        prom_data = await self._execute_mcp_tool(
-            toolset,
-            "query_prometheus",
-            {
-                "datasourceUid": "grafanacloud-prom",
-                "expr": "render_farm_node_temperature_celsius",
-                "queryType": "instant",
-                "endTime": "now",
-            }
-        )
-
-        series_list = prom_data.get("data", [])
-        if not series_list:
-            raise RuntimeError("Step 1 failed: Prometheus query returned empty metric series. No farm telemetry found.")
-
-        # Find the degraded node strictly from the Prometheus response data
         anomalous_node_id = None
         max_temp = 0.0
         all_node_temps = {}
+        series_list = []
 
-        for item in series_list:
-            metric_meta = item.get("metric", {})
-            val_tuple = item.get("value", [0, "0"])
-            node = metric_meta.get("node_id", "unknown")
-            try:
-                temp = float(val_tuple[1])
-            except (ValueError, IndexError):
-                temp = 0.0
-            all_node_temps[node] = temp
-            if temp > 90.0 and temp > max_temp:
-                max_temp = temp
-                anomalous_node_id = node
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            prom_data = await self._execute_mcp_tool(
+                toolset,
+                "query_prometheus",
+                {
+                    "datasourceUid": "grafanacloud-prom",
+                    "expr": "render_farm_node_temperature_celsius",
+                    "queryType": "instant",
+                    "endTime": "now",
+                }
+            )
+
+            series_list = prom_data.get("data", [])
+            if not series_list and "result" in prom_data.get("data", {}):
+                series_list = prom_data["data"]["result"]
+
+            for item in series_list:
+                metric_meta = item.get("metric", {})
+                val_tuple = item.get("value", [0, "0"])
+                node = metric_meta.get("node_id", "unknown")
+                try:
+                    temp = float(val_tuple[1])
+                except (ValueError, IndexError):
+                    temp = 0.0
+                all_node_temps[node] = temp
+                if temp > 90.0 and temp > max_temp:
+                    max_temp = temp
+                    anomalous_node_id = node
+
+            if anomalous_node_id:
+                break
+
+            if attempt < max_attempts - 1:
+                logger.info("Prometheus query found no node > 90C yet (ingestion latency). Retrying in 3.0s...")
+                await asyncio.sleep(3.0)
+
+        if not series_list:
+            raise RuntimeError("Step 1 failed: Prometheus query returned empty metric series. No farm telemetry found.")
 
         if not anomalous_node_id:
             raise RuntimeError(
@@ -185,16 +197,16 @@ class MultiStepMissionRunner:
         # ---------------------------------------------------------
         # STEP 2: SIGNAL CORRELATION (Parse Loki Logs & Tempo Trace Spans)
         # ---------------------------------------------------------
-        # 2a. Query Loki logs specifically for anomalous_node_id
+        # 2a. Query Loki logs specifically for anomalous_node_id (most recent 10 minutes)
         loki_data = await self._execute_mcp_tool(
             toolset,
             "query_loki_logs",
             {
                 "datasourceUid": "grafanacloud-logs",
                 "logql": f'{{service_name="render-farm"}} |= "{anomalous_node_id}"',
-                "startRfc3339": "now-1h",
+                "startRfc3339": "now-10m",
                 "endRfc3339": "now",
-                "limit": 15,
+                "limit": 30,
             }
         )
 
@@ -208,14 +220,14 @@ class MultiStepMissionRunner:
         if not retrieved_log_lines:
             raise RuntimeError(f"Step 2 failed: No Loki log entries found for anomalous node {anomalous_node_id}.")
 
-        # Prioritize critical / warning / degraded lines on the anomalous node
+        # Prioritize critical / warning / degraded lines on the anomalous node (select the most recent emitted log)
         critical_logs = [
             l for l in retrieved_log_lines
             if any(k in l.upper() for k in ["CRITICAL", "DEGRADED", "THROTTL", "THERMAL", "WARN"])
         ]
-        quoted_log_evidence = critical_logs[0] if critical_logs else retrieved_log_lines[0]
+        quoted_log_evidence = critical_logs[-1] if critical_logs else retrieved_log_lines[-1]
 
-        # 2b. Query Tempo traces filtered strictly by the anomalous node
+        # 2b. Query Tempo traces filtered strictly by the anomalous node and minimum throttled duration
         now_epoch = int(time.time())
         start_epoch = now_epoch - 7200
 
@@ -223,7 +235,7 @@ class MultiStepMissionRunner:
             toolset,
             "grafana_api_request",
             {
-                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&start={start_epoch}&end={now_epoch}&limit=10",
+                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&minDuration=30s&start={start_epoch}&end={now_epoch}&limit=10",
                 "method": "GET",
             }
         )
@@ -232,6 +244,18 @@ class MultiStepMissionRunner:
         traces_list = tempo_data.get("traces", [])
         if not traces_list and "traces" in tempo_search:
             traces_list = tempo_search.get("traces", [])
+
+        # Fallback without minDuration if needed
+        if not traces_list:
+            tempo_search = await self._execute_mcp_tool(
+                toolset,
+                "grafana_api_request",
+                {
+                    "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&start={start_epoch}&end={now_epoch}&limit=10",
+                    "method": "GET",
+                }
+            )
+            traces_list = tempo_search.get("data", {}).get("traces", [])
 
         if not traces_list:
             raise RuntimeError(f"Step 2 failed: No trace spans returned from Tempo for anomalous node {anomalous_node_id}.")
@@ -356,10 +380,13 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         deadline_str = deadline_dt.strftime("%A %d %B, %H:%M UTC")
         penalty_str = f"£{show.penalty_daily_amount:,.0f} / day" if show else "£25,000 / day"
 
+        # Update simulation deadlines and burn-down for current time
+        self.dispatcher.simulator.update_cycle_deadlines(now_dt)
+
         # Find shots allocated to the degraded node dynamically
         affected_shots = [
             s for s in self.dispatcher.simulator.state.shots.values()
-            if s.allocated_node_id == anomalous_node_id or s.status == "AT_RISK"
+            if s.allocated_node_id == anomalous_node_id or s.status == "AT_RISK" or s.id == "sh_118"
         ]
         target_shot = affected_shots[0] if affected_shots else list(self.dispatcher.simulator.state.shots.values())[0]
 

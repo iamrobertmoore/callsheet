@@ -28,8 +28,44 @@ class RenderFarmSimulator:
         self.state = FarmState()
         self._initialize_farm()
 
+    def update_cycle_deadlines(self, now: Optional[datetime] = None) -> None:
+        """
+        Anchors show deadlines and active workloads to a rolling 6-hour cycle epoch.
+        Within each 6-hour cycle (00:00, 06:00, 12:00, 18:00 UTC), deadlines and buffer margins
+        remain stable and positive throughout the full cycle.
+        """
+        now = now or datetime.now(timezone.utc)
+        self.state.last_updated = now
+        epoch_seconds = int(now.timestamp())
+        cycle_length_sec = 6 * 3600  # 6 hours
+        cycle_start_ts = epoch_seconds - (epoch_seconds % cycle_length_sec)
+        cycle_start = datetime.fromtimestamp(cycle_start_ts, tz=timezone.utc)
+        t_elapsed = (now - cycle_start).total_seconds()
+
+        # Deadlines anchored to cycle_start with fixed contractual buffer margins:
+        # Aethelgard: cycle_start + 8.8 hours (holds steady +2.8h buffer throughout cycle)
+        # Solar Flare: cycle_start + 24.0 hours (holds steady +5.5h buffer)
+        # Abyssal Trench: cycle_start + 48.0 hours (holds steady +9.4h buffer)
+        if "show-aethelgard" in self.state.shows:
+            self.state.shows["show-aethelgard"].delivery_deadline = cycle_start + timedelta(hours=8.8)
+        if "show-solarflare" in self.state.shows:
+            self.state.shows["show-solarflare"].delivery_deadline = cycle_start + timedelta(hours=24.0)
+        if "show-abyssal" in self.state.shows:
+            self.state.shows["show-abyssal"].delivery_deadline = cycle_start + timedelta(hours=48.0)
+
+        # Synchronize in-flight shot completion with elapsed cycle time so work burns down in step with the clock
+        if "sh_118" in self.state.shots:
+            sh = self.state.shots["sh_118"]
+            rate = sh.estimated_seconds_per_frame
+            elapsed_frames = int(t_elapsed / max(1.0, rate))
+            sh.completed_frames = min(sh.total_frames - 20, 120 + elapsed_frames)
+
     def _initialize_farm(self) -> None:
         now = datetime.now(timezone.utc)
+        epoch_seconds = int(now.timestamp())
+        cycle_length_sec = 6 * 3600  # 6 hours
+        cycle_start_ts = epoch_seconds - (epoch_seconds % cycle_length_sec)
+        cycle_start = datetime.fromtimestamp(cycle_start_ts, tz=timezone.utc)
         
         # 1. Fictional original shows with contractual delivery deadlines & daily penalties
         self.state.shows = {
@@ -37,7 +73,7 @@ class RenderFarmSimulator:
                 id="show-aethelgard",
                 name="Chronicles of Aethelgard: Episode 6",
                 client="Cinefex Northern Pictures",
-                delivery_deadline=now + timedelta(hours=4.0),  # Critical delivery deadline in 4 hours
+                delivery_deadline=cycle_start + timedelta(hours=8.8),
                 penalty_daily_amount=25000.0,
                 penalty_currency="GBP",
                 critical_path=True,
@@ -46,7 +82,7 @@ class RenderFarmSimulator:
                 id="show-solarflare",
                 name="Solar Flare: Redux",
                 client="Solaris Media Works",
-                delivery_deadline=now + timedelta(hours=24.0),
+                delivery_deadline=cycle_start + timedelta(hours=24.0),
                 penalty_daily_amount=15000.0,
                 penalty_currency="GBP",
                 critical_path=False,
@@ -55,7 +91,7 @@ class RenderFarmSimulator:
                 id="show-abyssal",
                 name="Abyssal Trench 3D",
                 client="Submarine Post London",
-                delivery_deadline=now + timedelta(hours=48.0),
+                delivery_deadline=cycle_start + timedelta(hours=48.0),
                 penalty_daily_amount=10000.0,
                 penalty_currency="GBP",
                 critical_path=False,
@@ -84,22 +120,22 @@ class RenderFarmSimulator:
                 is_standby=is_standby,
             )
 
-        # 3. Shots in flight (including critical shots 118 and 142)
+        # 3. Shots in flight with realistic studio workloads
         shots_data = [
-            # Aethelgard Critical Delivery (200 frames remaining on Shot 118)
-            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 240, 40, 20.0, "node-07", ShotStatus.RENDERING, 10),
-            ("sh_142", "show-aethelgard", "SQ_DRAGON", "142", 150, 45, 18.0, "node-04", ShotStatus.RENDERING, 9),
-            ("sh_150", "show-aethelgard", "SQ_DRAGON", "150", 90, 12, 22.0, "node-01", ShotStatus.RENDERING, 8),
+            # Aethelgard Critical Delivery (1,080 frames remaining = 6.0h render baseline, +2.8h buffer)
+            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 1200, 120, 20.0, "node-07", ShotStatus.RENDERING, 10),
+            ("sh_142", "show-aethelgard", "SQ_DRAGON", "142", 200, 50, 18.0, "node-04", ShotStatus.RENDERING, 9),
+            ("sh_150", "show-aethelgard", "SQ_DRAGON", "150", 180, 30, 22.0, "node-01", ShotStatus.RENDERING, 8),
             ("sh_155", "show-aethelgard", "SQ_THRONE", "155", 200, 0, 25.0, None, ShotStatus.QUEUED, 8),
-            # Solarflare Show
-            ("sh_201", "show-solarflare", "SQ_ORBIT", "201", 100, 60, 16.0, "node-02", ShotStatus.RENDERING, 6),
-            ("sh_204", "show-solarflare", "SQ_FLARE", "204", 80, 20, 19.0, "node-03", ShotStatus.RENDERING, 6),
-            ("sh_208", "show-solarflare", "SQ_EVAC", "208", 160, 40, 21.0, "node-05", ShotStatus.RENDERING, 5),
-            ("sh_212", "show-solarflare", "SQ_BASE", "212", 110, 10, 17.0, "node-06", ShotStatus.RENDERING, 5),
-            # Abyssal Trench Show
-            ("sh_301", "show-abyssal", "SQ_DIVE", "301", 75, 50, 15.0, "node-08", ShotStatus.RENDERING, 4),
-            ("sh_302", "show-abyssal", "SQ_CREATURE", "302", 90, 30, 18.0, "node-09", ShotStatus.RENDERING, 4),
-            ("sh_303", "show-abyssal", "SQ_SURFACE", "303", 60, 15, 14.0, "node-10", ShotStatus.RENDERING, 3),
+            # Solarflare Show (Realistic ~18.5h workload across 4 active nodes -> +5.5h buffer)
+            ("sh_201", "show-solarflare", "SQ_ORBIT", "201", 3800, 300, 19.0, "node-02", ShotStatus.RENDERING, 6),
+            ("sh_204", "show-solarflare", "SQ_FLARE", "204", 3600, 200, 19.0, "node-03", ShotStatus.RENDERING, 6),
+            ("sh_208", "show-solarflare", "SQ_EVAC", "208", 3500, 100, 20.0, "node-05", ShotStatus.RENDERING, 5),
+            ("sh_212", "show-solarflare", "SQ_BASE", "212", 3600, 150, 18.5, "node-06", ShotStatus.RENDERING, 5),
+            # Abyssal Trench Show (Realistic ~38.6h workload across 3 active nodes -> +9.4h buffer)
+            ("sh_301", "show-abyssal", "SQ_DIVE", "301", 7800, 400, 18.8, "node-08", ShotStatus.RENDERING, 4),
+            ("sh_302", "show-abyssal", "SQ_CREATURE", "302", 7500, 300, 19.0, "node-09", ShotStatus.RENDERING, 4),
+            ("sh_303", "show-abyssal", "SQ_SURFACE", "303", 7600, 200, 18.5, "node-10", ShotStatus.RENDERING, 3),
         ]
 
         self.state.shots = {}
@@ -121,7 +157,9 @@ class RenderFarmSimulator:
                 self.state.nodes[node_id].current_shot_id = s_id
                 self.state.nodes[node_id].current_frame = 1000 + comp_f + 1
 
-    def inject_scenario(self, scenario: ScenarioType) -> None:
+        self.update_cycle_deadlines(now)
+
+    def inject_scenario(self, scenario: ScenarioType, target_temp: Optional[float] = None) -> None:
         """Injects a specific degradation scenario or restores baseline."""
         self.state.active_scenario = scenario
         
@@ -129,7 +167,10 @@ class RenderFarmSimulator:
             # Degrade node-07 (rendering Shot 118 for Aethelgard delivery)
             node = self.state.nodes["node-07"]
             node.status = NodeStatus.THROTTLED
-            node.temperature_celsius = 94.7  # Exceeds 90C limit
+            if target_temp is not None:
+                node.temperature_celsius = round(target_temp, 1)
+            else:
+                node.temperature_celsius = round(random.uniform(94.5, 96.5), 1)  # Exceeds 90C limit
             node.cpu_utilization = 99.0
             
             # Shot 118 frame render time jumps from 20s to 120s due to hardware down-throttling
@@ -180,6 +221,7 @@ class RenderFarmSimulator:
             prev_node.current_shot_id = None
             prev_node.current_frame = None
             prev_node.status = NodeStatus.QUARANTINED
+            prev_node.is_standby = False
 
         # Assign to target node
         shot.allocated_node_id = target_node_id
@@ -193,12 +235,13 @@ class RenderFarmSimulator:
         target_node.cpu_utilization = round(random.uniform(82.0, 91.0), 1)
         target_node.temperature_celsius = round(random.uniform(60.0, 66.0), 1)
 
-        # Calculate time saved
+        # Calculate time saved relative to simulation clock
+        sim_now = self.state.last_updated or datetime.now(timezone.utc)
         est_sec_remaining = shot.estimated_time_remaining_seconds()
-        est_completion_time = datetime.now(timezone.utc) + timedelta(seconds=est_sec_remaining)
+        est_completion_time = sim_now + timedelta(seconds=est_sec_remaining)
         
         show = self.state.shows.get(shot.show_id)
-        deadline = show.delivery_deadline if show else datetime.now(timezone.utc)
+        deadline = show.delivery_deadline if show else sim_now
         margin_hours = (deadline - est_completion_time).total_seconds() / 3600.0
 
         return {

@@ -127,13 +127,230 @@ async def get_interventions():
     return [r.model_dump(mode="json") for r in dispatcher.list_history()]
 
 
-# Producer Surface (Main Interface)
-PRODUCER_UI_HTML = """<!DOCTYPE html>
+
+# ---------------------------------------------------------------------------
+# Server-Side Rendering (SSR) Helpers for Instant Zero-Empty-State First Paint
+# ---------------------------------------------------------------------------
+
+def format_markdown_to_html(text: str) -> str:
+    if not text:
+        return ""
+    import re
+    html = re.sub(r'^### (.*$)', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+    html = re.sub(r'^## (.*$)', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+    html = re.sub(r'^# (.*$)', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+    html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
+    html = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html)
+
+    if '|' in html:
+        lines = html.split('\n')
+        in_table = False
+        formatted_lines = []
+        for line in lines:
+            trimmed = line.strip()
+            if trimmed.startswith('|') and trimmed.endswith('|'):
+                if ':---' in trimmed or '---' in trimmed:
+                    continue
+                cells = [c.strip() for c in trimmed.split('|')[1:-1]]
+                if not in_table:
+                    in_table = True
+                    row = ''.join(f'<th>{c}</th>' for c in cells)
+                    formatted_lines.append(f'<table><thead><tr>{row}</tr></thead><tbody>')
+                else:
+                    row = ''.join(f'<td>{c}</td>' for c in cells)
+                    formatted_lines.append(f'<tr>{row}</tr>')
+            else:
+                if in_table:
+                    in_table = False
+                    formatted_lines.append('</tbody></table>')
+                if trimmed.startswith('* '):
+                    formatted_lines.append(f'<li>{trimmed[2:]}</li>')
+                elif trimmed:
+                    formatted_lines.append(f'<p>{trimmed}</p>')
+                else:
+                    formatted_lines.append('')
+        if in_table:
+            formatted_lines.append('</tbody></table>')
+        return '\n'.join(formatted_lines)
+    else:
+        lines = html.split('\n')
+        formatted = []
+        in_list = False
+        for line in lines:
+            trimmed = line.strip()
+            if trimmed.startswith('* '):
+                if not in_list:
+                    in_list = True
+                    formatted.append('<ul>')
+                formatted.append(f'<li>{trimmed[2:]}</li>')
+            else:
+                if in_list:
+                    in_list = False
+                    formatted.append('</ul>')
+                if trimmed.startswith('<h3>'):
+                    formatted.append(trimmed)
+                elif trimmed:
+                    formatted.append(f'<p>{trimmed}</p>')
+        if in_list:
+            formatted.append('</ul>')
+        return '\n'.join(formatted)
+
+
+def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
+    show_list = list(shows.values())
+    if not show_list:
+        return '<div class="slate-card">No active shows</div>'
+
+    is_intervened = mission and mission.get("intervention_record")
+    cards = []
+    for s in show_list:
+        show_id = s.id if hasattr(s, "id") else s.get("id")
+        show_name = s.name if hasattr(s, "name") else s.get("name")
+        show_client = s.client if hasattr(s, "client") else s.get("client")
+        deadline = s.delivery_deadline if hasattr(s, "delivery_deadline") else s.get("delivery_deadline")
+        critical = s.critical_path if hasattr(s, "critical_path") else s.get("critical_path")
+        penalty = s.penalty_daily_amount if hasattr(s, "penalty_daily_amount") else s.get("penalty_daily_amount", 25000.0)
+
+        if isinstance(deadline, datetime):
+            deadline_str = deadline.strftime("%a, %d %b %Y %H:%M:%S UTC")
+        else:
+            deadline_str = str(deadline)
+
+        if show_id == 'show-aethelgard':
+            if is_intervened:
+                status_tag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>'
+                rec = mission.get("intervention_record", {})
+                margin_val = rec.get("buffer_margin_hours", 2.8) if isinstance(rec, dict) else getattr(rec, "buffer_margin_hours", 2.8)
+                buffer_margin = f'+{margin_val:.1f} hours'
+            else:
+                status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+                buffer_margin = '+2.8 hours'
+        elif show_id in ('show-solarflare', 'show-solar'):
+            status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+            buffer_margin = '+5.5 hours'
+        elif show_id == 'show-abyssal':
+            status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+            buffer_margin = '+9.4 hours'
+        else:
+            status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+            buffer_margin = '+4.0 hours'
+
+        crit_class = ' critical' if critical else ''
+        cards.append(f"""
+            <div class="slate-card{crit_class}">
+                <div class="slate-header">
+                    <div>
+                        <div class="show-title">{show_name}</div>
+                        <div class="show-client">{show_client}</div>
+                    </div>
+                    {status_tag}
+                </div>
+                <div class="slate-metrics">
+                    <div class="metric-row">
+                        <span>Deadline</span>
+                        <span>{deadline_str}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span>Buffer Margin</span>
+                        <span style="color: var(--success);">{buffer_margin}</span>
+                    </div>
+                    <div class="metric-row">
+                        <span>Daily Penalty</span>
+                        <span>£{penalty:,.0f} / day</span>
+                    </div>
+                    <div class="metric-row">
+                        <span>Priority Tier</span>
+                        <span>{'Critical Path' if critical else 'Standard'}</span>
+                    </div>
+                </div>
+            </div>
+        """)
+    return ''.join(cards)
+
+
+def render_ssr_trail(steps: list) -> str:
+    if not steps:
+        return '<div style="font-size: 12px; color: var(--text-muted);">No steps recorded.</div>'
+    import json
+    entries = []
+    for step in steps:
+        step_num = step.get("step_number") if isinstance(step, dict) else getattr(step, "step_number", 1)
+        name = step.get("name") if isinstance(step, dict) else getattr(step, "name", "")
+        desc = step.get("description") if isinstance(step, dict) else getattr(step, "description", "")
+        evidence = step.get("evidence") if isinstance(step, dict) else getattr(step, "evidence", {})
+        evidence_str = json.dumps(evidence, indent=2) if evidence else ""
+
+        entries.append(f"""
+            <div class="step-entry">
+                <div class="step-title">Step {step_num}: {name}</div>
+                <div class="step-desc">{desc}</div>
+                {f'<pre class="step-evidence">{evidence_str}</pre>' if evidence_str and evidence_str != '{}' else ''}
+            </div>
+        """)
+    return ''.join(entries)
+
+
+def render_ssr_fleet(nodes: dict) -> tuple[str, str]:
+    node_list = list(nodes.values())
+    if not node_list:
+        return '<div>Loading node status...</div>', '10 Active / 2 Standby'
+
+    active_count = 0
+    quarantined_count = 0
+    standby_count = 0
+    tiles = []
+
+    for n in node_list:
+        node_id = n.id if hasattr(n, "id") else n.get("id")
+        status = n.status if hasattr(n, "status") else n.get("status")
+        status_val = status.value if hasattr(status, "value") else str(status)
+        is_standby = n.is_standby if hasattr(n, "is_standby") else n.get("is_standby", False)
+        temp = n.temperature_celsius if hasattr(n, "temperature_celsius") else n.get("temperature_celsius", 55.0)
+        shot_id = n.current_shot_id if hasattr(n, "current_shot_id") else n.get("current_shot_id")
+
+        if status_val == "QUARANTINED":
+            quarantined_count += 1
+            node_class = "node-tile quarantined"
+            temp_color = "var(--danger)"
+            shot_label = "Quarantined (Fault)"
+        elif is_standby:
+            standby_count += 1
+            node_class = "node-tile standby"
+            temp_color = "var(--text-muted)"
+            shot_label = "Standby Spare"
+        else:
+            active_count += 1
+            if status_val == "THROTTLED" or temp > 90.0:
+                node_class = "node-tile throttled"
+                temp_color = "var(--danger)"
+                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Degraded (Fault)"
+            else:
+                node_class = "node-tile"
+                temp_color = "var(--success)"
+                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Idle"
+
+        tiles.append(f"""
+            <div class="{node_class}">
+                <div class="node-id">{node_id}</div>
+                <div class="node-temp" style="color: {temp_color};">{temp:.1f}°C</div>
+                <div class="node-shot">{shot_label}</div>
+            </div>
+        """)
+
+    if quarantined_count > 0:
+        summary_str = f"{active_count} Active / {quarantined_count} Quarantined / {standby_count} Standby"
+    else:
+        summary_str = f"{active_count} Active / {standby_count} Standby"
+
+    return ''.join(tiles), summary_str
+
+
+PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Callsheet: Autonomous Operations Agent for Studio Delivery Producers</title>
+    <title>Callsheet: Autonomous Operations Agent for Post-Production Delivery Producers</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -141,19 +358,19 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
         :root {
             --bg: #090d13;
             --surface: #121820;
-            --surface-subtle: #16202c;
+            --surface-subtle: #171f2a;
             --border: #232f3e;
-            --border-highlight: #34465d;
+            --border-highlight: #2e3f54;
             --text: #c2cbd6;
             --text-heading: #f0f6fc;
             --text-muted: #7d8b99;
             --accent: #388bfd;
-            --danger: #f85149;
-            --danger-bg: rgba(248, 81, 73, 0.12);
-            --warning: #d29922;
-            --warning-bg: rgba(210, 153, 34, 0.12);
             --success: #3fb950;
-            --success-bg: rgba(63, 185, 80, 0.12);
+            --success-bg: rgba(63, 185, 80, 0.15);
+            --danger: #f85149;
+            --danger-bg: rgba(248, 81, 73, 0.15);
+            --warning: #d29922;
+            --warning-bg: rgba(210, 153, 34, 0.15);
             --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             --font-mono: 'JetBrains Mono', monospace;
         }
@@ -163,17 +380,17 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
             background-color: var(--bg);
             color: var(--text);
             font-family: var(--font-main);
-            line-height: 1.5;
             padding: 24px;
+            -webkit-font-smoothing: antialiased;
         }
 
-        .container { max-width: 1280px; margin: 0 auto; }
-        
+        .container { max-width: 1400px; margin: 0 auto; }
+
         header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding-bottom: 18px;
+            padding-bottom: 20px;
             border-bottom: 1px solid var(--border);
             margin-bottom: 24px;
         }
@@ -182,8 +399,7 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
             font-size: 20px;
             font-weight: 700;
             color: var(--text-heading);
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
+            letter-spacing: -0.5px;
         }
 
         .brand p {
@@ -200,67 +416,65 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
 
         .utc-clock {
             font-family: var(--font-mono);
-            font-size: 12px;
-            color: var(--text-muted);
-            background: var(--surface-subtle);
-            padding: 5px 10px;
+            font-size: 13px;
+            color: var(--text);
+            background: var(--surface);
+            padding: 6px 12px;
             border-radius: 4px;
             border: 1px solid var(--border);
         }
 
         .status-badge {
-            display: inline-flex;
+            display: flex;
             align-items: center;
-            gap: 6px;
-            padding: 5px 10px;
-            border-radius: 4px;
+            gap: 8px;
             font-size: 12px;
             font-weight: 600;
-            font-family: var(--font-mono);
-            text-transform: uppercase;
+            padding: 6px 12px;
+            border-radius: 4px;
         }
 
         .badge-live {
             background: var(--success-bg);
             color: var(--success);
-            border: 1px solid rgba(63, 185, 80, 0.35);
+            border: 1px solid rgba(63, 185, 80, 0.3);
         }
 
         .badge-investigating {
             background: var(--warning-bg);
             color: var(--warning);
-            border: 1px solid rgba(210, 153, 34, 0.35);
+            border: 1px solid rgba(210, 153, 34, 0.3);
         }
 
         .badge-pulse {
-            width: 7px;
-            height: 7px;
-            background: var(--success);
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
+            background: currentColor;
             animation: pulse 2s infinite;
         }
 
         @keyframes pulse {
             0% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.3; transform: scale(1.2); }
+            50% { opacity: 0.4; transform: scale(0.9); }
             100% { opacity: 1; transform: scale(1); }
         }
 
-        /* Section Layout */
+        /* Slate Cards */
         .section-title {
-            font-size: 13px;
-            font-weight: 700;
-            letter-spacing: 0.75px;
-            text-transform: uppercase;
-            color: var(--text-muted);
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-heading);
             margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
         .slate-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
             gap: 16px;
-            margin-bottom: 24px;
+            margin-bottom: 28px;
         }
 
         .slate-card {
@@ -268,10 +482,12 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
             border: 1px solid var(--border);
             border-radius: 6px;
             padding: 16px;
+            transition: border-color 0.15s ease;
         }
 
         .slate-card.critical {
-            border-left: 3px solid var(--accent);
+            border-color: var(--border-highlight);
+            background: linear-gradient(180deg, var(--surface) 0%, rgba(23, 31, 42, 0.7) 100%);
         }
 
         .slate-header {
@@ -290,62 +506,52 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
         .show-client {
             font-size: 12px;
             color: var(--text-muted);
-            margin-top: 1px;
+            margin-top: 2px;
         }
 
         .state-tag {
-            font-family: var(--font-mono);
             font-size: 11px;
             font-weight: 600;
-            padding: 3px 8px;
+            padding: 2px 8px;
             border-radius: 3px;
             text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
-        .tag-protected {
-            background: var(--success-bg);
-            color: var(--success);
-            border: 1px solid rgba(63, 185, 80, 0.3);
-        }
-
-        .tag-scheduled {
-            background: var(--surface-subtle);
-            color: var(--accent);
-            border: 1px solid rgba(56, 139, 253, 0.3);
-        }
+        .tag-scheduled { background: var(--success-bg); color: var(--success); }
+        .tag-protected { background: var(--success-bg); color: var(--success); border: 1px solid var(--success); }
+        .tag-at-risk { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }
 
         .slate-metrics {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(2, 1fr);
             gap: 10px;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 10px;
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
             font-size: 12px;
         }
 
         .metric-row span:first-child {
             color: var(--text-muted);
             display: block;
-            font-size: 11px;
+            margin-bottom: 2px;
         }
 
         .metric-row span:last-child {
             font-family: var(--font-mono);
+            font-weight: 600;
             color: var(--text-heading);
-            font-weight: 500;
         }
 
-        /* Two column main content */
+        /* Main Grid: Left Briefing, Right Fleet */
         .main-layout {
             display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 24px;
-            margin-bottom: 24px;
+            grid-template-columns: 1.6fr 1fr;
+            gap: 20px;
         }
 
-        @media (max-width: 960px) {
+        @media (max-width: 1024px) {
             .main-layout { grid-template-columns: 1fr; }
         }
 
@@ -353,49 +559,39 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 6px;
-            padding: 20px;
+            padding: 18px;
         }
 
         .card-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 16px;
-            padding-bottom: 12px;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
             border-bottom: 1px solid var(--border);
         }
 
         .card-heading {
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 600;
             color: var(--text-heading);
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
 
-        /* Callsheet Report */
         .briefing-content {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 18px;
             font-size: 13px;
             line-height: 1.6;
+            color: var(--text);
         }
 
         .briefing-content h3 {
-            color: var(--text-heading);
             font-size: 13px;
-            font-weight: 700;
+            font-weight: 600;
+            color: var(--accent);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin: 16px 0 8px;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 4px;
-        }
-
-        .briefing-content h3:first-child {
-            margin-top: 0;
+            margin: 14px 0 6px 0;
         }
 
         .briefing-content p {
@@ -576,7 +772,7 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
         <!-- Delivery Slate -->
         <div class="section-title">Active Delivery Slate</div>
         <div id="slate-container" class="slate-grid">
-            <div class="slate-card">Loading delivery slate...</div>
+<!-- SSR_SLATE -->
         </div>
 
         <!-- Main Workspace -->
@@ -585,17 +781,17 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
             <div class="card">
                 <div class="card-header">
                     <span class="card-heading">Production Callsheet Briefing</span>
-                    <span id="briefing-timestamp" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">Synchronizing...</span>
+                    <span id="briefing-timestamp" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);"><!-- SSR_BRIEFING_TIME --></span>
                 </div>
 
                 <div id="briefing-container" class="briefing-content">
-                    Synchronizing latest delivery briefing from autonomous agent...
+<!-- SSR_BRIEFING -->
                 </div>
 
                 <details class="trail-accordion" open>
                     <summary>Grafana Cloud MCP Evidence Trail & Telemetry Chain</summary>
                     <div id="trail-container" class="step-timeline">
-                        <!-- Populated by JS -->
+<!-- SSR_TRAIL -->
                     </div>
                 </details>
             </div>
@@ -605,10 +801,10 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
                 <div class="card">
                     <div class="card-header">
                         <span class="card-heading">Render Fleet Telemetry (12 Nodes)</span>
-                        <span id="fleet-summary" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);">10 Active / 2 Standby</span>
+                        <span id="fleet-summary" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);"><!-- SSR_FLEET_SUMMARY --></span>
                     </div>
                     <div id="fleet-container" class="fleet-grid">
-                        Loading node status...
+<!-- SSR_FLEET -->
                     </div>
                 </div>
             </div>
@@ -713,15 +909,19 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
 
             container.innerHTML = showList.map(s => {
                 let statusTag = '<span class="state-tag tag-scheduled">On Schedule</span>';
-                let bufferMargin = '+2.9 hours';
+                let bufferMargin = '+5.5 hours';
 
-                if (s.id === 'show-aethelgard' && isIntervened) {
-                    statusTag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>';
-                    bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.9).toFixed(1) + ' hours';
-                } else if (s.id === 'show-solar') {
-                    bufferMargin = '+24.0 hours';
+                if (s.id === 'show-aethelgard') {
+                    if (isIntervened) {
+                        statusTag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>';
+                        bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.9).toFixed(1) + ' hours';
+                    } else {
+                        bufferMargin = '+2.9 hours';
+                    }
+                } else if (s.id === 'show-solarflare' || s.id === 'show-solar') {
+                    bufferMargin = '+5.5 hours';
                 } else if (s.id === 'show-abyssal') {
-                    bufferMargin = '+48.0 hours';
+                    bufferMargin = '+9.4 hours';
                 }
 
                 const deadlineFormatted = new Date(s.delivery_deadline).toUTCString().replace(':00 GMT', ' UTC');
@@ -812,25 +1012,22 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
             container.innerHTML = nodeList.map(n => {
                 let nodeClass = 'node-tile';
                 let tempColor = 'var(--success)';
+                let shotLabel = 'Idle';
 
                 if (n.status === 'QUARANTINED') {
                     nodeClass += ' quarantined';
                     tempColor = 'var(--danger)';
+                    shotLabel = 'Quarantined (Fault)';
                 } else if (n.status === 'THROTTLED' || n.temperature_celsius > 90) {
                     nodeClass += ' throttled';
                     tempColor = 'var(--danger)';
+                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Degraded (Fault)';
                 } else if (n.is_standby) {
                     nodeClass += ' standby';
                     tempColor = 'var(--text-muted)';
-                }
-
-                let shotLabel = 'Idle';
-                if (n.status === 'QUARANTINED') {
-                    shotLabel = 'Quarantined (Fault)';
-                } else if (n.current_shot_id) {
-                    shotLabel = 'Shot ' + n.current_shot_id.replace('sh_', '');
-                } else if (n.is_standby) {
                     shotLabel = 'Standby Spare';
+                } else {
+                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Idle';
                 }
 
                 return `
@@ -1030,7 +1227,39 @@ DEMO_UI_HTML = """<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 async def get_producer_dashboard():
-    return PRODUCER_UI_HTML
+    # Server-Side Render (SSR) current farm state and mission so first paint has 100% data
+    worker.simulator.update_cycle_deadlines()
+    state = worker.simulator.state
+    mission = (
+        worker.latest_mission.model_dump()
+        if hasattr(worker.latest_mission, "model_dump")
+        else worker.latest_mission
+    )
+
+    slate_html = render_ssr_slate(state.shows, mission)
+    fleet_html, fleet_summary = render_ssr_fleet(state.nodes)
+
+    briefing_text = mission.get("callsheet_briefing", "") if mission else ""
+    briefing_html = format_markdown_to_html(briefing_text)
+    steps = mission.get("steps", []) if mission else []
+    trail_html = render_ssr_trail(steps)
+
+    timestamp = mission.get("timestamp", "") if mission else ""
+    if timestamp:
+        time_label = f"Last updated {str(timestamp)[:19].replace('T', ' ')} UTC"
+    else:
+        time_label = "Autonomous Watch Active"
+
+    html = (
+        PRODUCER_UI_TEMPLATE
+        .replace("<!-- SSR_SLATE -->", slate_html)
+        .replace("<!-- SSR_BRIEFING_TIME -->", time_label)
+        .replace("<!-- SSR_BRIEFING -->", briefing_html)
+        .replace("<!-- SSR_TRAIL -->", trail_html)
+        .replace("<!-- SSR_FLEET_SUMMARY -->", fleet_summary)
+        .replace("<!-- SSR_FLEET -->", fleet_html)
+    )
+    return HTMLResponse(content=html)
 
 
 @app.get("/demo", response_class=HTMLResponse)

@@ -80,3 +80,77 @@ async def test_farm_worker_start_stop():
     await asyncio.sleep(0.3)
     await worker.stop()
     assert worker._running is False
+
+
+def test_buffer_stability_across_full_six_hour_cycle():
+    """
+    Proves that the protected delivery buffer for Chronicles of Aethelgard: Episode 6
+    remains stably above +2.0 hours at cycle start, mid-cycle, and 5 minutes before rollover.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    sim = RenderFarmSimulator()
+    base_epoch = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)  # Cycle start at 12:00 UTC
+
+    # 1. Test at cycle start (t = 0.0h)
+    sim.update_cycle_deadlines(base_epoch)
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    result_start = sim.reallocate_shot("sh_118", "node-11")
+    assert result_start["buffer_margin_hours"] >= 2.0, f"Buffer at start {result_start['buffer_margin_hours']} < 2.0h"
+    assert result_start["status"] == "PROTECTED"
+
+    # 2. Test mid-cycle (t = 3.0h)
+    mid_cycle = base_epoch + timedelta(hours=3.0)
+    sim = RenderFarmSimulator()
+    sim.update_cycle_deadlines(mid_cycle)
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    result_mid = sim.reallocate_shot("sh_118", "node-11")
+    assert result_mid["buffer_margin_hours"] >= 2.0, f"Buffer at mid-cycle {result_mid['buffer_margin_hours']} < 2.0h"
+    assert result_mid["status"] == "PROTECTED"
+
+    # 3. Test 5 minutes before rollover (t = 5h 55m)
+    near_end = base_epoch + timedelta(hours=5, minutes=55)
+    sim = RenderFarmSimulator()
+    sim.update_cycle_deadlines(near_end)
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    result_end = sim.reallocate_shot("sh_118", "node-11")
+    assert result_end["buffer_margin_hours"] >= 2.0, f"Buffer near end {result_end['buffer_margin_hours']} < 2.0h"
+    assert result_end["status"] == "PROTECTED"
+
+
+def test_sampled_temperature_variation_across_injections():
+    """Verify that node temperature sampling generates realistic variation across cycles."""
+    sim = RenderFarmSimulator()
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    t1 = sim.state.nodes["node-07"].temperature_celsius
+    assert 94.0 <= t1 <= 97.0
+
+    # Invert/re-inject to test dynamic sampling
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    t2 = sim.state.nodes["node-07"].temperature_celsius
+    assert 94.0 <= t2 <= 97.0
+
+
+@pytest.mark.asyncio
+async def test_server_side_rendering_zero_empty_state():
+    """Verify that the root endpoint delivers pre-rendered HTML with 100% of data and no loading text."""
+    from callsheet.web.app import get_producer_dashboard
+
+    response = await get_producer_dashboard()
+    html = response.body.decode("utf-8")
+
+    # Assert no loading placeholders exist in the SSR output
+    assert "Loading delivery slate..." not in html
+    assert "Synchronizing latest delivery briefing" not in html
+    assert "Loading node status..." not in html
+
+    # Assert essential cards and sections are present
+    assert "Chronicles of Aethelgard: Episode 6" in html
+    assert "Solar Flare: Redux" in html
+    assert "Abyssal Trench 3D" in html
+    assert "node-07" in html
+    assert "node-11" in html
+    assert "node-12" in html
+    assert "Active Delivery Slate" in html
+    assert "Production Callsheet Briefing" in html
+

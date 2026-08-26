@@ -5,10 +5,9 @@ Runs periodic ticks and handles scenario injections.
 
 import asyncio
 import logging
-from typing import Optional
-
-from datetime import datetime, timezone
 import os
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from callsheet.farm.emitter import FarmTelemetryEmitter
@@ -70,8 +69,8 @@ The autonomous operations agent is actively monitoring the render farm across Pr
 | Show Name | Shot Code | Node | Frames Remaining | Projected Delivery | Buffer Margin |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | Chronicles of Aethelgard: Ep 6 | SQ_SIEGE / sh118 | node-07 | 200 | Nominal Rate (20.0s/frame) | +2.9 hours |
-| Solar Flare: Redux | SQ_CORONA / sh204 | node-02 | 120 | Nominal Rate (19.0s/frame) | +24.0 hours |
-| Abyssal Trench 3D | SQ_TRENCH / sh310 | node-04 | 80 | Nominal Rate (18.0s/frame) | +48.0 hours |
+| Solar Flare: Redux | SQ_CORONA / sh204 | node-02 | 3,400 | Nominal Rate (19.0s/frame) | +5.5 hours |
+| Abyssal Trench 3D | SQ_TRENCH / sh310 | node-08 | 7,400 | Nominal Rate (18.8s/frame) | +9.4 hours |
 
 ### 4. TELEMETRY AUDIT TRAIL
 * Prometheus Metric: render_farm_node_temperature_celsius average 58.5°C across active nodes.
@@ -83,7 +82,8 @@ The autonomous operations agent is actively monitoring the render farm across Pr
 class FarmWorker:
     """
     Continuous background loop that advances farm state, emits telemetry every tick,
-    and runs the autonomous watchdog to trigger missions automatically on anomalies.
+    manages rolling 6-hour cycle epochs, and runs the autonomous watchdog to trigger
+    missions automatically on anomalies.
     """
 
     def __init__(
@@ -92,16 +92,19 @@ class FarmWorker:
         emitter: Optional[FarmTelemetryEmitter] = None,
         mission_runner: Optional[Any] = None,
         tick_interval_seconds: float = 5.0,
+        cycle_interval_seconds: float = 6.0 * 3600.0,
     ):
         self.simulator = simulator or RenderFarmSimulator()
         self.emitter = emitter or FarmTelemetryEmitter(self.simulator)
         self.mission_runner = mission_runner
         self.tick_interval_seconds = tick_interval_seconds
+        self.cycle_interval_seconds = cycle_interval_seconds
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self.latest_mission: Dict[str, Any] = get_default_healthy_briefing()
         self.is_investigating = False
         self._last_investigated_node: Optional[str] = None
+        self._last_cycle_epoch: Optional[int] = None
 
     async def start(self) -> None:
         """Starts the continuous emission and autonomous watchdog loop."""
@@ -109,7 +112,7 @@ class FarmWorker:
             return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
-        logger.info("Farm continuous worker started (interval: %.1fs)", self.tick_interval_seconds)
+        logger.info("Farm continuous worker started (interval: %.1fs, cycle: %.1fh)", self.tick_interval_seconds, self.cycle_interval_seconds / 3600.0)
 
     async def stop(self) -> None:
         """Stops the continuous emission loop."""
@@ -126,6 +129,23 @@ class FarmWorker:
     async def _run_loop(self) -> None:
         while self._running:
             try:
+                now_ts = int(time.time())
+                current_epoch = int(now_ts // self.cycle_interval_seconds)
+
+                # Update deadlines to align with the 6-hour cycle
+                self.simulator.update_cycle_deadlines()
+
+                # Handle cycle rollover
+                if self._last_cycle_epoch is None:
+                    self._last_cycle_epoch = current_epoch
+                    # Prime thermal throttling for the initial cycle
+                    self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+                elif current_epoch != self._last_cycle_epoch:
+                    logger.info("New 6-hour cycle epoch (%d) started. Re-arming anomaly...", current_epoch)
+                    self._last_cycle_epoch = current_epoch
+                    self._last_investigated_node = None
+                    self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+
                 # 1. Advance simulation state
                 events = self.simulator.tick(delta_seconds=self.tick_interval_seconds)
 
@@ -148,6 +168,7 @@ class FarmWorker:
         """
         Watches for degraded nodes crossing thermal or failure limits.
         When detected, automatically triggers the 6-step mission without user intervention.
+        The last successful mission persists on screen until a new one replaces it.
         """
         if not self.mission_runner or self.is_investigating:
             return
@@ -168,9 +189,10 @@ class FarmWorker:
                 )
                 self.is_investigating = True
                 try:
-                    # Allow 2 seconds for telemetry to be indexed in Grafana Cloud
-                    await asyncio.sleep(2.0)
+                    # Allow 8 seconds for telemetry to be written and indexed in Grafana Cloud
+                    await asyncio.sleep(8.0)
                     res = await self.mission_runner.execute_mission(show_id="show-aethelgard")
+                    # Atomically update latest_mission
                     self.latest_mission = res.model_dump(mode="json")
                     self._last_investigated_node = target_node.id
                     logger.info("Autonomous mission completed successfully for %s", target_node.id)
@@ -180,13 +202,11 @@ class FarmWorker:
                     self.is_investigating = False
 
     def inject_scenario(self, scenario: ScenarioType) -> None:
-        """Injects a scenario into the running simulator."""
+        """Injects a scenario into the running simulator (used by /demo or filming)."""
         self.simulator.inject_scenario(scenario)
-        if scenario == ScenarioType.BASELINE:
-            self._last_investigated_node = None
-            self.is_investigating = False
-            self.latest_mission = get_default_healthy_briefing()
-        logger.info("Injected scenario: %s", scenario.value)
+        self._last_investigated_node = None
+        self.is_investigating = False
+        logger.info("Injected scenario: %s (watchdog re-armed)", scenario.value)
 
     def reallocate_shot(self, shot_id: str, target_node_id: str) -> dict:
         """Executes a shot reallocation on the running simulator."""
