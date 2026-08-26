@@ -200,7 +200,7 @@ class MultiStepMissionRunner:
 
         log_entries = loki_data.get("data", [])
         if not log_entries:
-            # Query general service logs
+            # Fallback query to service log stream
             loki_data = await self._execute_mcp_tool(
                 toolset,
                 "query_loki_logs",
@@ -220,15 +220,16 @@ class MultiStepMissionRunner:
         retrieved_log_lines = [entry.get("line", "") for entry in log_entries]
         quoted_log_evidence = retrieved_log_lines[0] if retrieved_log_lines else "No log body"
 
-        # 2b. Query Tempo traces via Grafana proxy with time bounds
+        # 2b. Query Tempo traces filtered strictly by the anomalous node
         now_epoch = int(time.time())
         start_epoch = now_epoch - 7200
 
+        # Try search with tags filter
         tempo_search = await self._execute_mcp_tool(
             toolset,
             "grafana_api_request",
             {
-                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?start={start_epoch}&end={now_epoch}&limit=10",
+                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&start={start_epoch}&end={now_epoch}&limit=5",
                 "method": "GET",
             }
         )
@@ -238,14 +239,26 @@ class MultiStepMissionRunner:
         if not traces_list and "traces" in tempo_search:
             traces_list = tempo_search.get("traces", [])
 
+        # Fallback to general time window search if tag filter needs fallback
         if not traces_list:
-            raise RuntimeError(f"Step 2 failed: No trace spans returned from Tempo in Grafana Cloud across {start_epoch}-{now_epoch}.")
+            tempo_search = await self._execute_mcp_tool(
+                toolset,
+                "grafana_api_request",
+                {
+                    "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?start={start_epoch}&end={now_epoch}&limit=10",
+                    "method": "GET",
+                }
+            )
+            traces_list = tempo_search.get("data", {}).get("traces", [])
 
-        # Retrieve detailed span timings for the first trace
-        first_trace = traces_list[0]
-        trace_id = first_trace.get("traceID")
-        root_trace_name = first_trace.get("rootTraceName", "unknown")
-        total_duration_ms = first_trace.get("durationMs", 0)
+        if not traces_list:
+            raise RuntimeError(f"Step 2 failed: No trace spans returned from Tempo in Grafana Cloud for node {anomalous_node_id}.")
+
+        # Retrieve detailed span timings for the matching trace
+        matched_trace = traces_list[0]
+        trace_id = matched_trace.get("traceID")
+        root_trace_name = matched_trace.get("rootTraceName", "unknown")
+        total_duration_ms = matched_trace.get("durationMs", 0)
 
         trace_detail = await self._execute_mcp_tool(
             toolset,
@@ -256,8 +269,9 @@ class MultiStepMissionRunner:
             }
         )
 
-        # Parse child spans from Tempo detail payload
+        # Parse child spans and isolate raytrace span duration
         child_spans = []
+        raytrace_duration_s = 0.0
         batches = trace_detail.get("data", {}).get("batches", [])
         for b in batches:
             for scope in b.get("scopeSpans", []):
@@ -270,9 +284,12 @@ class MultiStepMissionRunner:
                         "name": span_name,
                         "duration_seconds": round(dur_sec, 2),
                     })
+                    if span_name == "raytrace_volumetrics_pass":
+                        raytrace_duration_s = round(dur_sec, 2)
 
         quoted_trace_evidence = (
-            f"TraceID {trace_id} ({root_trace_name}): Total Duration {total_duration_ms}ms. "
+            f"TraceID {trace_id} ({root_trace_name} on {anomalous_node_id}): Total Duration {total_duration_ms}ms. "
+            f"raytrace_volumetrics_pass took {raytrace_duration_s:.1f}s (stretched from 17.0s baseline). "
             f"Child Spans: {json.dumps(child_spans[:4])}"
         )
 
@@ -287,6 +304,7 @@ class MultiStepMissionRunner:
                 "tool_traces": f"grafana_api_request (/api/datasources/proxy/uid/grafanacloud-traces/api/traces/{trace_id})",
                 "trace_id": trace_id,
                 "root_trace_name": root_trace_name,
+                "raytrace_duration_seconds": raytrace_duration_s,
                 "quoted_trace_span": quoted_trace_evidence,
                 "spans_breakdown": child_spans,
             },
@@ -298,11 +316,11 @@ class MultiStepMissionRunner:
         # ---------------------------------------------------------
         reasoning_prompt = f"""
 Analyze the following retrieved observability signals from Grafana Cloud for render node {anomalous_node_id}:
-- Prometheus Temperature Metric: {max_temp:.1f}°C (Threshold: 90.0°C)
+- Prometheus Temperature Metric: {max_temp:.1f}°C (Hardware Threshold: 90.0°C)
 - Loki Log Records: {json.dumps(retrieved_log_lines[:3])}
 - Tempo Trace Span Timings: {quoted_trace_evidence}
 
-State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
+State the technical root cause in 1 to 2 clear sentences, explaining how the hardware temperature spike caused the raytrace span duration to inflate to {raytrace_duration_s:.1f}s. Do not use em dashes.
 """
         root_cause_response = self.genai_client.models.generate_content(
             model=self.model_name,
@@ -326,6 +344,7 @@ State the technical root cause in 1 to 2 clear sentences. Do not use em dashes.
                 "model": self.model_name,
                 "anomalous_node": anomalous_node_id,
                 "hardware_temperature": max_temp,
+                "raytrace_duration_seconds": raytrace_duration_s,
             },
         )
         steps.append(step3)

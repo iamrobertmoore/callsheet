@@ -230,46 +230,98 @@ class FarmTelemetryEmitter:
         duration_seconds: float,
         is_throttled: bool = False,
     ) -> None:
-        """Emits a detailed execution trace for a completed frame to Tempo via OTLP."""
-        start_time_ns = int((time.time() - duration_seconds) * 1e9)
+        """
+        Emits a detailed execution trace for a completed frame to Tempo via OTLP.
+        Explicitly portions durations:
+        - Load stage: 2.0s constant
+        - Denoise stage: 1.0s constant
+        - Raytrace volumetrics stage: absorbs the remaining duration (17.0s normal vs 117.0s throttled).
+        """
+        now = time.time()
+        t_start_ns = int((now - duration_seconds) * 1e9)
+        t_end_ns = int(now * 1e9)
 
-        with self.tracer.start_as_current_span(
+        # 1. Root span
+        root_span = self.tracer.start_span(
             f"render_frame_sh{shot_code}_{frame_number}",
-            start_time=start_time_ns,
+            start_time=t_start_ns,
             attributes={
                 "shot.code": shot_code,
+                "shot_code": shot_code,
                 "frame.number": frame_number,
                 "node.id": node_id,
+                "node_id": node_id,
                 "show.name": show_name,
                 "duration.seconds": duration_seconds,
                 "node.throttled": is_throttled,
             },
-        ):
-            load_duration = 2.5
-            t1 = start_time_ns
-            with self.tracer.start_as_current_span(
-                "load_geometry_and_textures",
-                start_time=t1,
-                attributes={"assets.count": 42, "textures.size_mb": 1450},
-            ):
-                pass
+        )
+        ctx = trace.set_span_in_context(root_span)
 
-            with self.tracer.start_as_current_span(
-                "raytrace_volumetrics_pass",
-                attributes={
-                    "samples_per_pixel": 1024,
-                    "bounces": 8,
-                    "thermal_throttled": is_throttled,
-                },
-            ) as s2:
-                if is_throttled:
-                    s2.set_attribute("warning", "CPU clock frequency throttled to 800MHz due to high thermal junction temp")
+        # 2. Stage 1: Load geometry and textures (constant 2.0s)
+        load_dur = min(2.0, max(0.5, duration_seconds * 0.1))
+        t1_start_ns = t_start_ns
+        t1_end_ns = t_start_ns + int(load_dur * 1e9)
+        
+        s1 = self.tracer.start_span(
+            "load_geometry_and_textures",
+            context=ctx,
+            start_time=t1_start_ns,
+            attributes={
+                "assets.count": 42,
+                "textures.size_mb": 1450,
+                "node_id": node_id,
+                "node.id": node_id,
+            },
+        )
+        s1.end(end_time=t1_end_ns)
 
-            with self.tracer.start_as_current_span(
-                "denoise_and_color_grade",
-                attributes={"denoiser": "OptiX", "lut": "ACEScg"},
-            ):
-                pass
+        # 3. Stage 3: Denoise and color grade (constant 1.0s)
+        denoise_dur = min(1.0, max(0.2, duration_seconds * 0.05))
+        t3_start_ns = t_end_ns - int(denoise_dur * 1e9)
+        t3_end_ns = t_end_ns
+
+        # 4. Stage 2: Raytrace volumetrics (takes the bulk of render time)
+        t2_start_ns = t1_end_ns
+        t2_end_ns = t3_start_ns
+        raytrace_dur = max(0.1, (t2_end_ns - t2_start_ns) / 1e9)
+
+        s2_attrs = {
+            "samples_per_pixel": 1024,
+            "bounces": 8,
+            "thermal_throttled": is_throttled,
+            "node_id": node_id,
+            "node.id": node_id,
+            "duration_seconds": round(raytrace_dur, 2),
+        }
+        if is_throttled:
+            s2_attrs["warning"] = "CPU clock frequency throttled to 800MHz due to high thermal junction temp"
+            s2_attrs["bottleneck"] = "hardware_thermal_throttle"
+
+        s2 = self.tracer.start_span(
+            "raytrace_volumetrics_pass",
+            context=ctx,
+            start_time=t2_start_ns,
+            attributes=s2_attrs,
+        )
+        s2.end(end_time=t2_end_ns)
+
+        # End Stage 3
+        s3 = self.tracer.start_span(
+            "denoise_and_color_grade",
+            context=ctx,
+            start_time=t3_start_ns,
+            attributes={
+                "denoiser": "OptiX",
+                "lut": "ACEScg",
+                "node_id": node_id,
+                "node.id": node_id,
+            },
+        )
+        s3.end(end_time=t3_end_ns)
+
+        # End Root Span
+        root_span.end(end_time=t_end_ns)
 
         self.hist_frame_duration.record(
             duration_seconds,
