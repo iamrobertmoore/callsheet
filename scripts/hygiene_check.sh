@@ -8,37 +8,56 @@ EMPLOYER_HYGIENE="REDACTED|REDACTED|REDACTED"
 
 FAIL=0
 
-# Check 1: Forbidden non-Google AI and agent dependencies/imports
+# Helper to check a specific set of files
+check_pattern() {
+    local pattern="$1"
+    local desc="$2"
+    
+    # 1. Check tracked files via git grep
+    local tracked_matches
+    tracked_matches=$(git grep -iE "$pattern" -- ':(exclude)scripts/hygiene_check.sh' ':(exclude).git' ':(exclude).env*' || true)
+    
+    # 2. Check untracked non-ignored files
+    local untracked_files
+    untracked_files=$(git ls-files --others --exclude-standard -x 'scripts/hygiene_check.sh' -x '.env*')
+    local untracked_matches=""
+    if [ -n "$untracked_files" ]; then
+        untracked_matches=$(echo "$untracked_files" | xargs grep -iE "$pattern" 2>/dev/null || true)
+    fi
+    
+    local all_matches=""
+    if [ -n "$tracked_matches" ]; then
+        all_matches="$tracked_matches"
+    fi
+    if [ -n "$untracked_matches" ]; then
+        if [ -n "$all_matches" ]; then
+            all_matches="$all_matches"$'\n'"$untracked_matches"
+        else
+            all_matches="$untracked_matches"
+        fi
+    fi
+    
+    if [ -n "$all_matches" ]; then
+        echo "ERROR: Found forbidden matches for $desc:"
+        echo "$all_matches"
+        FAIL=1
+    else
+        echo "PASS: No matches found for $desc."
+    fi
+}
+
 echo "Check 1: Prohibited third-party AI frameworks and APIs..."
-# Grep excluding this hygiene script itself and .git directory
-FORBIDDEN_MATCHES=$(git grep -iE "$FORBIDDEN_DEPS" -- ':(exclude)scripts/hygiene_check.sh' ':(exclude).git' || true)
-if [ -n "$FORBIDDEN_MATCHES" ]; then
-    echo "ERROR: Found forbidden framework or library references:"
-    echo "$FORBIDDEN_MATCHES"
-    FAIL=1
-else
-    echo "PASS: No forbidden framework or library references found."
-fi
+check_pattern "$FORBIDDEN_DEPS" "prohibited frameworks"
 
-# Check 2: Employer hygiene keywords
 echo "Check 2: Employer hygiene keywords..."
-EMPLOYER_MATCHES=$(git grep -iE "$EMPLOYER_HYGIENE" -- ':(exclude)scripts/hygiene_check.sh' ':(exclude).git' || true)
-if [ -n "$EMPLOYER_MATCHES" ]; then
-    echo "ERROR: Found employer hygiene keywords:"
-    echo "$EMPLOYER_MATCHES"
-    FAIL=1
-else
-    echo "PASS: No employer hygiene keywords found."
-fi
+check_pattern "$EMPLOYER_HYGIENE" "employer hygiene keywords"
 
-# Check 3: Git author identity
 echo "Check 3: Git author identity..."
 if git rev-parse --verify HEAD >/dev/null 2>&1; then
     AUTHORS=$(git log --format='%an <%ae>' | sort -u)
     echo "Commit authors in history:"
     echo "$AUTHORS"
     
-    # Ensure all commit authors contain Robert Moore
     NON_ROBERT=$(echo "$AUTHORS" | grep -v "Robert Moore" || true)
     if [ -n "$NON_ROBERT" ]; then
         echo "ERROR: Found non-personal author identity:"
