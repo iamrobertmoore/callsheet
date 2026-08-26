@@ -37,7 +37,7 @@ class RenderFarmSimulator:
                 id="show-aethelgard",
                 name="Chronicles of Aethelgard: Episode 6",
                 client="Cinefex Northern Pictures",
-                delivery_deadline=now + timedelta(hours=18),  # Tuesday deadline
+                delivery_deadline=now + timedelta(hours=4.0),  # Critical delivery deadline in 4 hours
                 penalty_daily_amount=25000.0,
                 penalty_currency="GBP",
                 critical_path=True,
@@ -46,7 +46,7 @@ class RenderFarmSimulator:
                 id="show-solarflare",
                 name="Solar Flare: Redux",
                 client="Solaris Media Works",
-                delivery_deadline=now + timedelta(hours=42),  # Thursday deadline
+                delivery_deadline=now + timedelta(hours=24.0),
                 penalty_daily_amount=15000.0,
                 penalty_currency="GBP",
                 critical_path=False,
@@ -55,7 +55,7 @@ class RenderFarmSimulator:
                 id="show-abyssal",
                 name="Abyssal Trench 3D",
                 client="Submarine Post London",
-                delivery_deadline=now + timedelta(hours=68),  # Friday deadline
+                delivery_deadline=now + timedelta(hours=48.0),
                 penalty_daily_amount=10000.0,
                 penalty_currency="GBP",
                 critical_path=False,
@@ -86,8 +86,8 @@ class RenderFarmSimulator:
 
         # 3. Shots in flight (including critical shots 118 and 142)
         shots_data = [
-            # Aethelgard Critical Delivery (Tuesday)
-            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 120, 24, 20.0, "node-07", ShotStatus.RENDERING, 10),
+            # Aethelgard Critical Delivery (200 frames remaining on Shot 118)
+            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 240, 40, 20.0, "node-07", ShotStatus.RENDERING, 10),
             ("sh_142", "show-aethelgard", "SQ_DRAGON", "142", 150, 45, 18.0, "node-04", ShotStatus.RENDERING, 9),
             ("sh_150", "show-aethelgard", "SQ_DRAGON", "150", 90, 12, 22.0, "node-01", ShotStatus.RENDERING, 8),
             ("sh_155", "show-aethelgard", "SQ_THRONE", "155", 200, 0, 25.0, None, ShotStatus.QUEUED, 8),
@@ -126,10 +126,10 @@ class RenderFarmSimulator:
         self.state.active_scenario = scenario
         
         if scenario == ScenarioType.THERMAL_THROTTLING:
-            # Degrade node-07 (rendering Shot 118 for Tuesday Aethelgard delivery)
+            # Degrade node-07 (rendering Shot 118 for Aethelgard delivery)
             node = self.state.nodes["node-07"]
             node.status = NodeStatus.THROTTLED
-            node.temperature_celsius = 94.5  # Exceeds 90C limit
+            node.temperature_celsius = 94.7  # Exceeds 90C limit
             node.cpu_utilization = 99.0
             
             # Shot 118 frame render time jumps from 20s to 120s due to hardware down-throttling
@@ -162,8 +162,8 @@ class RenderFarmSimulator:
 
     def reallocate_shot(self, shot_id: str, target_node_id: str) -> dict:
         """
-        Intervention action: moves a shot from a degraded node to a target node (e.g. standby node-12).
-        Restores clean render frame rate and updates completion projections.
+        Intervention action: moves a shot from a degraded node to a target node (e.g. standby node-11).
+        Quarantines the degraded node and restores clean render frame rate on the standby node.
         """
         if shot_id not in self.state.shots:
             raise ValueError(f"Shot {shot_id} not found in farm state.")
@@ -174,11 +174,12 @@ class RenderFarmSimulator:
         prev_node_id = shot.allocated_node_id
         target_node = self.state.nodes[target_node_id]
 
-        # Release previous node
+        # Release previous node and quarantine it
         if prev_node_id and prev_node_id in self.state.nodes:
             prev_node = self.state.nodes[prev_node_id]
             prev_node.current_shot_id = None
             prev_node.current_frame = None
+            prev_node.status = NodeStatus.QUARANTINED
 
         # Assign to target node
         shot.allocated_node_id = target_node_id

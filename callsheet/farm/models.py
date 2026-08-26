@@ -14,6 +14,7 @@ class NodeStatus(str, Enum):
     OOM_CRITICAL = "OOM_CRITICAL"
     OFFLINE = "OFFLINE"
     STANDBY = "STANDBY"
+    QUARANTINED = "QUARANTINED"
 
 
 class ShotStatus(str, Enum):

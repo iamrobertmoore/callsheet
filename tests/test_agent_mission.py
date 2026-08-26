@@ -37,12 +37,20 @@ async def test_full_six_step_mission_against_live_grafana():
     emitter.emit_metrics_tick()
     emitter.process_events(events)
     emitter.emit_log(
-        "CRITICAL: Thermal junction temperature on node-07 reached 94.5C. Render task for shot 118 throttled.",
+        "CRITICAL: Thermal junction temperature on node-07 reached 94.7C. Render task for shot 118 throttled.",
         level="WARN",
         node_id="node-07",
         shot_code="118",
         show_id="show-aethelgard",
         frame_number=1025,
+    )
+    emitter.emit_frame_trace(
+        node_id="node-07",
+        shot_code="118",
+        show_name="Chronicles of Aethelgard: Episode 6",
+        frame_number=1025,
+        duration_seconds=120.0,
+        is_throttled=True,
     )
     emitter.metric_reader.force_flush()
     emitter.logger_provider.force_flush()

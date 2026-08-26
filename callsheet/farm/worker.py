@@ -53,25 +53,25 @@ def get_default_healthy_briefing() -> Dict[str, Any]:
             {
                 "step_number": 3,
                 "name": "Delivery Buffer Margin Audit",
-                "description": "All 3 client shows on schedule. Chronicles of Aethelgard: Episode 6 buffer margin: +17.5 hours before £25,000/day penalty.",
+                "description": "All 3 client shows on schedule. Chronicles of Aethelgard: Episode 6 buffer margin: +2.9 hours before £25,000/day penalty.",
                 "status": "COMPLETED",
-                "evidence": {"buffer_margin_hours": 17.5, "status": "ON SCHEDULE"},
+                "evidence": {"buffer_margin_hours": 2.9, "status": "ON SCHEDULE"},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
         ],
         "callsheet_briefing": """### 1. STATUS HEADLINE
-Thursday delivery for Chronicles of Aethelgard: Episode 6 is on schedule with all render nodes operating nominally.
+Delivery for Chronicles of Aethelgard: Episode 6 is on schedule with all render nodes operating nominally.
 
 ### 2. EXECUTIVE SUMMARY
-The autonomous operations agent is actively monitoring the render farm across Prometheus metrics, Loki logs, and Tempo traces. All 10 active render nodes are operating within normal thermal thresholds (peak 65.1°C against the 90.0°C limit) with raytrace frame durations holding steady at 17.0s. All 3 shows remain on schedule. Chronicles of Aethelgard: Episode 6 maintains a 17.5 hour safety cushion before the client delivery deadline, and both standby spares (node-11 and node-12) are armed and ready for failover.
+The autonomous operations agent is actively monitoring the render farm across Prometheus metrics, Loki logs, and Tempo traces. All 10 active render nodes are operating within normal thermal thresholds (peak 65.1°C against the 90.0°C limit) with raytrace frame durations holding steady at 17.0s baseline. All 3 shows remain on schedule. Chronicles of Aethelgard: Episode 6 maintains a +2.9 hour safety cushion before the contractual delivery deadline, and both standby spares (node-11 and node-12) are armed and ready for failover.
 
 ### 3. SHOT BREAKDOWN TABLE
 
 | Show Name | Shot Code | Node | Frames Remaining | Projected Delivery | Buffer Margin |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Chronicles of Aethelgard: Ep 6 | SQ_SIEGE / sh118 | node-07 | 95 | Wed 26 Aug, 14:05 UTC | +17.5 hours |
-| Solar Flare: Redux | SQ_CORONA / sh204 | node-02 | 120 | Wed 26 Aug, 18:30 UTC | +24.0 hours |
-| Abyssal Trench 3D | SQ_TRENCH / sh310 | node-04 | 80 | Thu 27 Aug, 02:15 UTC | +32.0 hours |
+| Chronicles of Aethelgard: Ep 6 | SQ_SIEGE / sh118 | node-07 | 200 | Nominal Rate (20.0s/frame) | +2.9 hours |
+| Solar Flare: Redux | SQ_CORONA / sh204 | node-02 | 120 | Nominal Rate (19.0s/frame) | +24.0 hours |
+| Abyssal Trench 3D | SQ_TRENCH / sh310 | node-04 | 80 | Nominal Rate (18.0s/frame) | +48.0 hours |
 
 ### 4. TELEMETRY AUDIT TRAIL
 * Prometheus Metric: render_farm_node_temperature_celsius average 58.5°C across active nodes.

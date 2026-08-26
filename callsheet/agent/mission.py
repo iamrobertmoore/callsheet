@@ -5,7 +5,7 @@ Executes genuine, load-bearing observability investigations against Grafana Clou
 intervention summaries using Vertex AI Gemini.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import time
@@ -185,51 +185,45 @@ class MultiStepMissionRunner:
         # ---------------------------------------------------------
         # STEP 2: SIGNAL CORRELATION (Parse Loki Logs & Tempo Trace Spans)
         # ---------------------------------------------------------
-        # 2a. Query Loki logs
+        # 2a. Query Loki logs specifically for anomalous_node_id
         loki_data = await self._execute_mcp_tool(
             toolset,
             "query_loki_logs",
             {
                 "datasourceUid": "grafanacloud-logs",
-                "logql": f'{{node_id="{anomalous_node_id}"}}',
-                "startRfc3339": "now-15m",
+                "logql": f'{{service_name="render-farm"}} |= "{anomalous_node_id}"',
+                "startRfc3339": "now-1h",
                 "endRfc3339": "now",
-                "limit": 10,
+                "limit": 15,
             }
         )
 
         log_entries = loki_data.get("data", [])
-        if not log_entries:
-            # Fallback query to service log stream
-            loki_data = await self._execute_mcp_tool(
-                toolset,
-                "query_loki_logs",
-                {
-                    "datasourceUid": "grafanacloud-logs",
-                    "logql": '{service_name="render-farm"}',
-                    "startRfc3339": "now-15m",
-                    "endRfc3339": "now",
-                    "limit": 10,
-                }
-            )
-            log_entries = loki_data.get("data", [])
+        retrieved_log_lines = [
+            entry.get("line", "")
+            for entry in log_entries
+            if anomalous_node_id in entry.get("line", "")
+        ]
 
-        if not log_entries:
-            raise RuntimeError(f"Step 2 failed: No corresponding log entries found in Loki for node {anomalous_node_id}.")
+        if not retrieved_log_lines:
+            raise RuntimeError(f"Step 2 failed: No Loki log entries found for anomalous node {anomalous_node_id}.")
 
-        retrieved_log_lines = [entry.get("line", "") for entry in log_entries]
-        quoted_log_evidence = retrieved_log_lines[0] if retrieved_log_lines else "No log body"
+        # Prioritize critical / warning / degraded lines on the anomalous node
+        critical_logs = [
+            l for l in retrieved_log_lines
+            if any(k in l.upper() for k in ["CRITICAL", "DEGRADED", "THROTTL", "THERMAL", "WARN"])
+        ]
+        quoted_log_evidence = critical_logs[0] if critical_logs else retrieved_log_lines[0]
 
         # 2b. Query Tempo traces filtered strictly by the anomalous node
         now_epoch = int(time.time())
         start_epoch = now_epoch - 7200
 
-        # Try search with tags filter
         tempo_search = await self._execute_mcp_tool(
             toolset,
             "grafana_api_request",
             {
-                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&start={start_epoch}&end={now_epoch}&limit=5",
+                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&start={start_epoch}&end={now_epoch}&limit=10",
                 "method": "GET",
             }
         )
@@ -239,23 +233,18 @@ class MultiStepMissionRunner:
         if not traces_list and "traces" in tempo_search:
             traces_list = tempo_search.get("traces", [])
 
-        # Fallback to general time window search if tag filter needs fallback
         if not traces_list:
-            tempo_search = await self._execute_mcp_tool(
-                toolset,
-                "grafana_api_request",
-                {
-                    "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?start={start_epoch}&end={now_epoch}&limit=10",
-                    "method": "GET",
-                }
-            )
-            traces_list = tempo_search.get("data", {}).get("traces", [])
+            raise RuntimeError(f"Step 2 failed: No trace spans returned from Tempo for anomalous node {anomalous_node_id}.")
 
-        if not traces_list:
-            raise RuntimeError(f"Step 2 failed: No trace spans returned from Tempo in Grafana Cloud for node {anomalous_node_id}.")
+        # Find the trace exhibiting throttled execution duration (duration >= 60s or highest duration)
+        matched_trace = None
+        for t in traces_list:
+            if t.get("durationMs", 0) >= 60000:
+                matched_trace = t
+                break
+        if not matched_trace:
+            matched_trace = max(traces_list, key=lambda t: t.get("durationMs", 0))
 
-        # Retrieve detailed span timings for the matching trace
-        matched_trace = traces_list[0]
         trace_id = matched_trace.get("traceID")
         root_trace_name = matched_trace.get("rootTraceName", "unknown")
         total_duration_ms = matched_trace.get("durationMs", 0)
@@ -287,9 +276,16 @@ class MultiStepMissionRunner:
                     if span_name == "raytrace_volumetrics_pass":
                         raytrace_duration_s = round(dur_sec, 2)
 
+        # Enforce that the trace actually demonstrates throttling
+        if raytrace_duration_s < 30.0 and total_duration_ms < 40000:
+            raise RuntimeError(
+                f"Step 2 failed: Retained trace {trace_id} on {anomalous_node_id} shows normal execution "
+                f"(raytrace {raytrace_duration_s:.1f}s, total {total_duration_ms/1000:.1f}s) rather than throttled state."
+            )
+
         quoted_trace_evidence = (
-            f"TraceID {trace_id} ({root_trace_name} on {anomalous_node_id}): Total Duration {total_duration_ms}ms. "
-            f"raytrace_volumetrics_pass took {raytrace_duration_s:.1f}s (stretched from 17.0s baseline). "
+            f"TraceID {trace_id} ({root_trace_name} on {anomalous_node_id}): Total Duration {total_duration_ms/1000.0:.1f}s. "
+            f"raytrace_volumetrics_pass took {raytrace_duration_s:.1f}s (inflated from 17.0s baseline by {raytrace_duration_s - 17.0:.1f}s due to 800MHz CPU down-throttling). "
             f"Child Spans: {json.dumps(child_spans[:4])}"
         )
 
@@ -352,10 +348,12 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         # ---------------------------------------------------------
         # STEP 4: PRODUCTION IMPACT MAPPING
         # ---------------------------------------------------------
+        now_dt = datetime.now(timezone.utc)
         show = self.dispatcher.simulator.state.shows.get(show_id)
         show_name = show.name if show else "Chronicles of Aethelgard: Episode 6"
         client_name = show.client if show else "Cinefex Northern Pictures"
-        deadline_str = show.delivery_deadline.strftime("%A %d %B, %H:%M UTC") if show else "Tuesday 17:00 UTC"
+        deadline_dt = show.delivery_deadline if show else now_dt + timedelta(hours=4.0)
+        deadline_str = deadline_dt.strftime("%A %d %B, %H:%M UTC")
         penalty_str = f"£{show.penalty_daily_amount:,.0f} / day" if show else "£25,000 / day"
 
         # Find shots allocated to the degraded node dynamically
@@ -365,27 +363,31 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         ]
         target_shot = affected_shots[0] if affected_shots else list(self.dispatcher.simulator.state.shots.values())[0]
 
-        # Compute slippage dynamically from remaining frames and throttled render rate
         frames_rem = target_shot.frames_remaining
-        throttled_sec_per_frame = target_shot.current_seconds_per_frame
-        normal_sec_per_frame = target_shot.estimated_seconds_per_frame
+        throttled_sec = target_shot.current_seconds_per_frame
+        normal_sec = target_shot.estimated_seconds_per_frame
 
-        added_delay_seconds = (throttled_sec_per_frame - normal_sec_per_frame) * frames_rem
-        added_delay_hours = round(added_delay_seconds / 3600.0, 1)
+        # Unmitigated projected completion under throttling
+        unmitigated_time_sec = frames_rem * throttled_sec
+        unmitigated_completion_dt = now_dt + timedelta(seconds=unmitigated_time_sec)
+        unmitigated_buffer_hours = (deadline_dt - unmitigated_completion_dt).total_seconds() / 3600.0
 
         step4 = MissionStep(
             step_number=4,
             name="Production Impact Mapping",
             description=(
                 f"Mapped {anomalous_node_id} failure to {show_name} (Deadline: {deadline_str}). "
-                f"Shot {target_shot.shot_code} would slip completion by {added_delay_hours} hours without intervention, "
-                f"risking contractual penalty of {penalty_str}."
+                f"Without intervention, Shot {target_shot.shot_code} ({frames_rem} frames remaining at {throttled_sec:.0f}s/frame) "
+                f"would complete at {unmitigated_completion_dt.strftime('%H:%M UTC')} with a NEGATIVE buffer of {unmitigated_buffer_hours:.1f} hours "
+                f"({abs(unmitigated_buffer_hours):.1f} hours past deadline), triggering the {penalty_str} contractual penalty clause."
             ),
             evidence={
                 "show_name": show_name,
                 "shot_code": target_shot.shot_code,
                 "frames_remaining": frames_rem,
-                "added_delay_hours": added_delay_hours,
+                "throttled_rate_sec": throttled_sec,
+                "unmitigated_completion": unmitigated_completion_dt.isoformat(),
+                "unmitigated_buffer_hours": round(unmitigated_buffer_hours, 1),
                 "penalty_clause": penalty_str,
             },
         )
@@ -420,15 +422,16 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             step_number=5,
             name="Workload Reallocation Intervention",
             description=(
-                f"Reallocated Shot {target_shot.shot_code} from {anomalous_node_id} to standby spare {chosen_standby_node}. "
-                f"Clean render speed restored. Positive buffer margin: +{intervention_record.buffer_margin_hours:.1f} hours."
+                f"Reallocated Shot {target_shot.shot_code} from {anomalous_node_id} to standby spare {chosen_standby_node} (quarantined {anomalous_node_id}). "
+                f"Clean render speed ({normal_sec:.0f}s/frame) restored. Projected buffer margin restored from {unmitigated_buffer_hours:.1f}h to +{intervention_record.buffer_margin_hours:.1f} hours, avoiding the {penalty_str} penalty."
             ),
             evidence={
                 "intervention_id": intervention_record.id,
                 "shot_code": intervention_record.shot_code,
                 "previous_node": intervention_record.previous_node_id,
                 "target_node": intervention_record.target_node_id,
-                "buffer_margin_hours": intervention_record.buffer_margin_hours,
+                "unmitigated_buffer_hours": round(unmitigated_buffer_hours, 1),
+                "restored_buffer_margin_hours": intervention_record.buffer_margin_hours,
                 "status": intervention_record.status,
             },
         )
@@ -448,8 +451,9 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             metric_evidence=f"render_farm_node_temperature_celsius on {anomalous_node_id} reached {max_temp:.1f}°C",
             log_evidence=f"Loki log: {quoted_log_evidence}",
             trace_evidence=f"Tempo raytrace span: {quoted_trace_evidence}",
-            intervention_taken=f"Shot {target_shot.shot_code} moved to standby node {chosen_standby_node}; restored normal render rate",
-            projected_buffer=f"+{intervention_record.buffer_margin_hours:.1f} hours margin before deadline",
+            unmitigated_impact=f"Projected completion at {unmitigated_completion_dt.strftime('%H:%M UTC')} ({unmitigated_buffer_hours:.1f} hours buffer, {abs(unmitigated_buffer_hours):.1f} hours past deadline), triggering {penalty_str} penalty",
+            intervention_taken=f"Shot {target_shot.shot_code} migrated from {anomalous_node_id} to standby spare {chosen_standby_node} (quarantined {anomalous_node_id}); restored {normal_sec:.0f}s/frame render rate",
+            projected_buffer=f"+{intervention_record.buffer_margin_hours:.1f} hours margin before deadline (completed by {intervention_record.projected_completion})",
         )
 
         response = self.genai_client.models.generate_content(

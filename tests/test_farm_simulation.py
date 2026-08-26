@@ -56,6 +56,9 @@ def test_shot_reallocation_intervention():
     assert node12.status == NodeStatus.HEALTHY
     assert node12.current_shot_id == "sh_118"
 
+    node7 = sim.state.nodes["node-07"]
+    assert node7.status == NodeStatus.QUARANTINED
+
     shot118 = sim.state.shots["sh_118"]
     assert shot118.allocated_node_id == "node-12"
     assert shot118.status == ShotStatus.RENDERING

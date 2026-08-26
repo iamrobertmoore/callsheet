@@ -37,19 +37,20 @@ Generate a producer Callsheet briefing for the following diagnosed event:
 
 SHOW: {show_name} (Client: {client})
 DEADLINE: {deadline}
-DAILY PENALTY: {penalty_daily_amount} {penalty_currency}
+CONTRACTUAL DAILY PENALTY: {penalty_daily_amount} {penalty_currency}
 AFFECTED SHOTS: {affected_shots}
 ROOT CAUSE: {root_cause}
 TELEMETRY EVIDENCE:
 - Metric: {metric_evidence}
 - Log: {log_evidence}
 - Trace: {trace_evidence}
+UNMITIGATED IMPACT WITHOUT INTERVENTION: {unmitigated_impact}
 INTERVENTION TAKEN: {intervention_taken}
-PROJECTED BUFFER: {projected_buffer}
+PROJECTED BUFFER RESTORED: {projected_buffer}
 
 Format the response strictly with:
-1. STATUS HEADLINE (e.g. "Tuesday delivery is protected after automatic intervention.")
-2. EXECUTIVE SUMMARY (2-3 sentences explaining what happened, which shots were affected, and the intervention executed)
+1. STATUS HEADLINE (State clearly that the delivery deadline is protected following automated failover)
+2. EXECUTIVE SUMMARY (Explain what happened, contrast the unmitigated negative buffer slippage and penalty risk with the restored positive buffer, and state the exact avoided penalty)
 3. SHOT BREAKDOWN TABLE (Shot Code, Previous Node, Target Node, Frames Remaining, New Completion Time, Buffer Margin)
-4. TELEMETRY AUDIT TRAIL (Brief citation of the Prometheus metric, Loki log message, and Tempo trace span that proved the cause)
+4. TELEMETRY AUDIT TRAIL (Brief citation of the Prometheus metric, Loki log message on the anomalous node, and Tempo trace span that proved the cause)
 """

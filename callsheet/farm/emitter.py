@@ -142,6 +142,7 @@ class FarmTelemetryEmitter:
                 NodeStatus.THROTTLED: 2,
                 NodeStatus.OOM_CRITICAL: 3,
                 NodeStatus.STANDBY: 4,
+                NodeStatus.QUARANTINED: 5,
                 NodeStatus.OFFLINE: 0,
             }
             status_int = status_map.get(node.status, 0)
@@ -151,6 +152,24 @@ class FarmTelemetryEmitter:
             self.gauge_temp.set(node.temperature_celsius, labels)
             self.gauge_gpu.set(node.gpu_utilization, labels)
             self.gauge_node_status.set(status_int, labels)
+
+            # If node is throttled or overheating, emit a structured thermal log and throttled trace
+            if node.status == NodeStatus.THROTTLED or node.temperature_celsius > node.thermal_limit_celsius:
+                self.emit_log(
+                    f"CRITICAL: Thermal junction temperature on {node.id} reached {node.temperature_celsius:.1f}C (threshold: {node.thermal_limit_celsius:.1f}C). Hardware clock down-throttled to 800MHz.",
+                    level="WARN",
+                    node_id=node.id,
+                    shot_code="118",
+                    show_id="show-aethelgard",
+                )
+                self.emit_frame_trace(
+                    node_id=node.id,
+                    shot_code="118",
+                    show_name="Chronicles of Aethelgard: Episode 6",
+                    frame_number=node.current_frame or 1105,
+                    duration_seconds=120.0,
+                    is_throttled=True,
+                )
 
         # 2. Emit active shot metrics (bounded set to prevent cardinality churn)
         for shot_id, shot in farm.shots.items():

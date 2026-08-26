@@ -517,6 +517,11 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
             background: var(--danger-bg);
         }
 
+        .node-tile.quarantined {
+            border: 2px solid var(--danger);
+            background: var(--danger-bg);
+        }
+
         .node-tile.standby {
             border-style: dashed;
             opacity: 0.75;
@@ -708,15 +713,15 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
 
             container.innerHTML = showList.map(s => {
                 let statusTag = '<span class="state-tag tag-scheduled">On Schedule</span>';
-                let bufferMargin = '+17.5 hours';
+                let bufferMargin = '+2.9 hours';
 
                 if (s.id === 'show-aethelgard' && isIntervened) {
                     statusTag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>';
-                    bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 17.5).toFixed(1) + ' hours';
+                    bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.9).toFixed(1) + ' hours';
                 } else if (s.id === 'show-solar') {
                     bufferMargin = '+24.0 hours';
                 } else if (s.id === 'show-abyssal') {
-                    bufferMargin = '+32.0 hours';
+                    bufferMargin = '+48.0 hours';
                 }
 
                 const deadlineFormatted = new Date(s.delivery_deadline).toUTCString().replace(':00 GMT', ' UTC');
@@ -790,14 +795,28 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
 
         function renderFleet(nodes) {
             const container = document.getElementById('fleet-container');
+            const summaryLabel = document.getElementById('fleet-summary');
             const nodeList = Object.values(nodes);
             if (!nodeList.length) return;
+
+            const activeCount = nodeList.filter(n => !n.is_standby && n.status !== 'QUARANTINED').length;
+            const quarantinedCount = nodeList.filter(n => n.status === 'QUARANTINED').length;
+            const standbyCount = nodeList.filter(n => n.is_standby).length;
+            
+            if (quarantinedCount > 0) {
+                summaryLabel.innerText = `${activeCount} Active / ${quarantinedCount} Quarantined / ${standbyCount} Standby`;
+            } else {
+                summaryLabel.innerText = `${activeCount} Active / ${standbyCount} Standby`;
+            }
 
             container.innerHTML = nodeList.map(n => {
                 let nodeClass = 'node-tile';
                 let tempColor = 'var(--success)';
 
-                if (n.status === 'THROTTLED' || n.temperature_celsius > 90) {
+                if (n.status === 'QUARANTINED') {
+                    nodeClass += ' quarantined';
+                    tempColor = 'var(--danger)';
+                } else if (n.status === 'THROTTLED' || n.temperature_celsius > 90) {
                     nodeClass += ' throttled';
                     tempColor = 'var(--danger)';
                 } else if (n.is_standby) {
@@ -805,7 +824,14 @@ PRODUCER_UI_HTML = """<!DOCTYPE html>
                     tempColor = 'var(--text-muted)';
                 }
 
-                let shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : (n.is_standby ? 'Standby Spare' : 'Idle');
+                let shotLabel = 'Idle';
+                if (n.status === 'QUARANTINED') {
+                    shotLabel = 'Quarantined (Fault)';
+                } else if (n.current_shot_id) {
+                    shotLabel = 'Shot ' + n.current_shot_id.replace('sh_', '');
+                } else if (n.is_standby) {
+                    shotLabel = 'Standby Spare';
+                }
 
                 return `
                     <div class="${nodeClass}">
