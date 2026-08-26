@@ -1,0 +1,272 @@
+"""
+Synthetic render farm simulation engine for post-production studio operations.
+Manages nodes, shows, shot scheduling, telemetry state, and scenario injections.
+"""
+
+from datetime import datetime, timedelta, timezone
+import random
+from typing import Optional
+from callsheet.farm.models import (
+    FarmState,
+    NodeStatus,
+    RenderNode,
+    ScenarioType,
+    Shot,
+    ShotStatus,
+    Show,
+)
+
+
+class RenderFarmSimulator:
+    """
+    Simulates a 12-node post-production render farm across multiple client shows.
+    Provides deterministic scenario degradation and dynamic workload reallocations.
+    """
+
+    def __init__(self, seed: int = 42):
+        random.seed(seed)
+        self.state = FarmState()
+        self._initialize_farm()
+
+    def _initialize_farm(self) -> None:
+        now = datetime.now(timezone.utc)
+        
+        # 1. Shows with contractual delivery deadlines & daily penalties
+        self.state.shows = {
+            "show-dune": Show(
+                id="show-dune",
+                name="Dune: Part Three VFX",
+                client="Warner Bros / Legendary",
+                delivery_deadline=now + timedelta(hours=18),  # Tuesday deadline
+                penalty_daily_amount=25000.0,
+                penalty_currency="GBP",
+                critical_path=True,
+            ),
+            "show-cyberpunk": Show(
+                id="show-cyberpunk",
+                name="Night City: Season 2",
+                client="Netflix Studios",
+                delivery_deadline=now + timedelta(hours=42),  # Thursday deadline
+                penalty_daily_amount=15000.0,
+                penalty_currency="GBP",
+                critical_path=False,
+            ),
+            "show-commercial": Show(
+                id="show-commercial",
+                name="SuperBowl Teaser Spot",
+                client="Ogilvy UK",
+                delivery_deadline=now + timedelta(hours=68),  # Friday deadline
+                penalty_daily_amount=10000.0,
+                penalty_currency="GBP",
+                critical_path=False,
+            ),
+        }
+
+        # 2. 12 Render Nodes (10 active workers, 2 standby spares)
+        self.state.nodes = {}
+        for i in range(1, 13):
+            node_id = f"node-{i:02d}"
+            is_standby = i >= 11
+            status = NodeStatus.STANDBY if is_standby else NodeStatus.HEALTHY
+            self.state.nodes[node_id] = RenderNode(
+                id=node_id,
+                name=f"Farm-Worker-{i:02d}",
+                gpu_type="NVIDIA RTX A6000" if i <= 6 else "NVIDIA RTX 4090",
+                vram_gb=48 if i <= 6 else 24,
+                cpu_cores=32 if i <= 6 else 64,
+                cpu_utilization=15.0 if is_standby else round(random.uniform(75.0, 92.0), 1),
+                memory_bytes_used=(8 if is_standby else random.randint(22, 38)) * 1024 * 1024 * 1024,
+                memory_bytes_total=64 * 1024 * 1024 * 1024,
+                temperature_celsius=42.0 if is_standby else round(random.uniform(56.0, 68.0), 1),
+                thermal_limit_celsius=90.0,
+                gpu_utilization=0.0 if is_standby else round(random.uniform(65.0, 88.0), 1),
+                status=status,
+                is_standby=is_standby,
+            )
+
+        # 3. Shots in flight (including critical shots 118 and 142)
+        shots_data = [
+            # Dune Critical Delivery (Tuesday)
+            ("sh_118", "show-dune", "SQ_SAND", "118", 120, 24, 20.0, "node-07", ShotStatus.RENDERING, 10),
+            ("sh_142", "show-dune", "SQ_ORNI", "142", 150, 45, 18.0, "node-04", ShotStatus.RENDERING, 9),
+            ("sh_150", "show-dune", "SQ_ORNI", "150", 90, 12, 22.0, "node-01", ShotStatus.RENDERING, 8),
+            ("sh_155", "show-dune", "SQ_BATTLE", "155", 200, 0, 25.0, None, ShotStatus.QUEUED, 8),
+            # Cyberpunk Show
+            ("sh_201", "show-cyberpunk", "SQ_ALLEY", "201", 100, 60, 16.0, "node-02", ShotStatus.RENDERING, 6),
+            ("sh_204", "show-cyberpunk", "SQ_CLUB", "204", 80, 20, 19.0, "node-03", ShotStatus.RENDERING, 6),
+            ("sh_208", "show-cyberpunk", "SQ_CHASE", "208", 160, 40, 21.0, "node-05", ShotStatus.RENDERING, 5),
+            ("sh_212", "show-cyberpunk", "SQ_NET", "212", 110, 10, 17.0, "node-06", ShotStatus.RENDERING, 5),
+            # Commercial Show
+            ("sh_301", "show-commercial", "SQ_HERO", "301", 75, 50, 15.0, "node-08", ShotStatus.RENDERING, 4),
+            ("sh_302", "show-commercial", "SQ_PACK", "302", 90, 30, 18.0, "node-09", ShotStatus.RENDERING, 4),
+            ("sh_303", "show-commercial", "SQ_END", "303", 60, 15, 14.0, "node-10", ShotStatus.RENDERING, 3),
+        ]
+
+        self.state.shots = {}
+        for s_id, show_id, seq, code, total_f, comp_f, sec_f, node_id, status, prio in shots_data:
+            self.state.shots[s_id] = Shot(
+                id=s_id,
+                show_id=show_id,
+                sequence=seq,
+                shot_code=code,
+                total_frames=total_f,
+                completed_frames=comp_f,
+                estimated_seconds_per_frame=sec_f,
+                current_seconds_per_frame=sec_f,
+                allocated_node_id=node_id,
+                status=status,
+                priority=prio,
+            )
+            if node_id and node_id in self.state.nodes:
+                self.state.nodes[node_id].current_shot_id = s_id
+                self.state.nodes[node_id].current_frame = 1000 + comp_f + 1
+
+    def inject_scenario(self, scenario: ScenarioType) -> None:
+        """Injects a specific degradation scenario or restores baseline."""
+        self.state.active_scenario = scenario
+        
+        if scenario == ScenarioType.THERMAL_THROTTLING:
+            # Degrade node-07 (rendering Shot 118 for Tuesday Dune delivery)
+            node = self.state.nodes["node-07"]
+            node.status = NodeStatus.THROTTLED
+            node.temperature_celsius = 94.5  # Exceeds 90C limit
+            node.cpu_utilization = 99.0
+            
+            # Shot 118 frame render time triples from 20s to 120s due to clock down-throttling
+            shot = self.state.shots.get("sh_118")
+            if shot:
+                shot.current_seconds_per_frame = 120.0
+                shot.status = ShotStatus.AT_RISK
+
+        elif scenario == ScenarioType.MEMORY_LEAK_OOM:
+            node = self.state.nodes["node-04"]
+            node.status = NodeStatus.OOM_CRITICAL
+            node.memory_bytes_used = int(63.2 * 1024 * 1024 * 1024)
+            shot = self.state.shots.get("sh_142")
+            if shot:
+                shot.status = ShotStatus.AT_RISK
+
+        elif scenario == ScenarioType.BASELINE:
+            for node_id, node in self.state.nodes.items():
+                if node.is_standby:
+                    node.status = NodeStatus.STANDBY
+                    node.temperature_celsius = 42.0
+                else:
+                    node.status = NodeStatus.HEALTHY
+                    node.temperature_celsius = round(random.uniform(58.0, 66.0), 1)
+            
+            for shot in self.state.shots.values():
+                shot.current_seconds_per_frame = shot.estimated_seconds_per_frame
+                if shot.status == ShotStatus.AT_RISK:
+                    shot.status = ShotStatus.RENDERING
+
+    def reallocate_shot(self, shot_id: str, target_node_id: str) -> dict:
+        """
+        Intervention action: moves a shot from a degraded node to a target node (e.g. standby node-12).
+        Restores clean render frame rate and updates completion projections.
+        """
+        if shot_id not in self.state.shots:
+            raise ValueError(f"Shot {shot_id} not found in farm state.")
+        if target_node_id not in self.state.nodes:
+            raise ValueError(f"Node {target_node_id} not found in farm state.")
+
+        shot = self.state.shots[shot_id]
+        prev_node_id = shot.allocated_node_id
+        target_node = self.state.nodes[target_node_id]
+
+        # Release previous node
+        if prev_node_id and prev_node_id in self.state.nodes:
+            prev_node = self.state.nodes[prev_node_id]
+            prev_node.current_shot_id = None
+            prev_node.current_frame = None
+
+        # Assign to target node
+        shot.allocated_node_id = target_node_id
+        shot.current_seconds_per_frame = shot.estimated_seconds_per_frame  # Normal speed restored
+        shot.status = ShotStatus.RENDERING
+        
+        target_node.status = NodeStatus.HEALTHY
+        target_node.is_standby = False
+        target_node.current_shot_id = shot_id
+        target_node.current_frame = 1000 + shot.completed_frames + 1
+        target_node.cpu_utilization = round(random.uniform(82.0, 91.0), 1)
+        target_node.temperature_celsius = round(random.uniform(60.0, 66.0), 1)
+
+        # Calculate time saved
+        est_sec_remaining = shot.estimated_time_remaining_seconds()
+        est_completion_time = datetime.now(timezone.utc) + timedelta(seconds=est_sec_remaining)
+        
+        show = self.state.shows.get(shot.show_id)
+        deadline = show.delivery_deadline if show else datetime.now(timezone.utc)
+        margin_hours = (deadline - est_completion_time).total_seconds() / 3600.0
+
+        return {
+            "shot_id": shot_id,
+            "shot_code": shot.shot_code,
+            "previous_node": prev_node_id,
+            "target_node": target_node_id,
+            "frames_remaining": shot.frames_remaining,
+            "estimated_seconds_per_frame": shot.current_seconds_per_frame,
+            "projected_completion": est_completion_time.isoformat(),
+            "deadline": deadline.isoformat(),
+            "buffer_margin_hours": round(margin_hours, 1),
+            "status": "PROTECTED" if margin_hours > 0 else "SLIPPING",
+        }
+
+    def tick(self, delta_seconds: float = 5.0) -> list[dict]:
+        """
+        Advances the simulation clock by delta_seconds.
+        Updates frame completion progress, emits completed frame events, and modulates metrics.
+        """
+        events = []
+        now = datetime.now(timezone.utc)
+        self.state.last_updated = now
+
+        for node_id, node in self.state.nodes.items():
+            if node.is_standby or not node.current_shot_id:
+                continue
+
+            shot = self.state.shots.get(node.current_shot_id)
+            if not shot:
+                continue
+
+            # Check thermal variation
+            if node.status == NodeStatus.THROTTLED:
+                node.temperature_celsius = min(98.0, node.temperature_celsius + random.uniform(0.1, 0.4))
+            elif node.status == NodeStatus.HEALTHY:
+                node.temperature_celsius = max(52.0, min(72.0, node.temperature_celsius + random.uniform(-0.5, 0.5)))
+
+            # Advance frame render based on seconds_per_frame
+            # Probability of frame completion in this tick
+            prob_complete = delta_seconds / max(1.0, shot.current_seconds_per_frame)
+            if random.random() < prob_complete and shot.completed_frames < shot.total_frames:
+                shot.completed_frames += 1
+                node.frames_completed_total += 1
+                current_frame = 1000 + shot.completed_frames
+                node.current_frame = current_frame
+
+                events.append({
+                    "type": "FRAME_COMPLETED",
+                    "node_id": node_id,
+                    "shot_id": shot.id,
+                    "shot_code": shot.shot_code,
+                    "show_id": shot.show_id,
+                    "frame_number": current_frame,
+                    "duration_seconds": shot.current_seconds_per_frame,
+                    "timestamp": now.isoformat(),
+                })
+
+                if shot.completed_frames >= shot.total_frames:
+                    shot.status = ShotStatus.COMPLETED
+                    node.current_shot_id = None
+                    node.current_frame = None
+                    events.append({
+                        "type": "SHOT_COMPLETED",
+                        "shot_id": shot.id,
+                        "shot_code": shot.shot_code,
+                        "show_id": shot.show_id,
+                        "node_id": node_id,
+                        "timestamp": now.isoformat(),
+                    })
+
+        return events
