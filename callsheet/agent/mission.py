@@ -542,6 +542,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             raise RuntimeError(f"Step 6 failed: Vertex AI Gemini ({self.model_name}) returned empty briefing text.")
 
         briefing_text = response.text.strip()
+        briefing_text = briefing_text.replace("Callshet", "Callsheet")
+        briefing_text = briefing_text.replace("—", " - ").replace("–", "-")
 
         step6 = MissionStep(
             step_number=6,
