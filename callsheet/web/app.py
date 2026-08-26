@@ -26,7 +26,7 @@ dispatcher = InterventionDispatcher(simulator=simulator)
 mission_runner = MultiStepMissionRunner(
     dispatcher=dispatcher,
     project_id=os.getenv("GOOGLE_CLOUD_PROJECT", "agent-attest-2026"),
-    location=os.getenv("GOOGLE_CLOUD_REGION", "global"),
+    location=os.getenv("VERTEX_AI_LOCATION", "global"),
     model_name="gemini-3.6-flash",
 )
 
