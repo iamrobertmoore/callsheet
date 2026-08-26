@@ -17,6 +17,13 @@ from callsheet.farm.models import (
 )
 
 
+def round_to_quarter_hour(dt: datetime) -> datetime:
+    """Rounds a datetime to the nearest 15 minutes (quarter hour) with 0 seconds."""
+    ts = dt.timestamp()
+    rounded_ts = round(ts / 900.0) * 900
+    return datetime.fromtimestamp(rounded_ts, tz=timezone.utc)
+
+
 class RenderFarmSimulator:
     """
     Simulates a 12-node post-production render farm across multiple client shows.
@@ -46,13 +53,13 @@ class RenderFarmSimulator:
         self._current_cycle_epoch = int(epoch_seconds // cycle_length_sec)
 
         # 1. Shows with contractual delivery deadlines & daily penalties
-        # Aethelgard deadline is fixed at cycle_start + 8.5 hours
+        # Aethelgard delivery milestone for active sequence due 3.83h from dispatch (1.33h render + 2.5h buffer)
         self.state.shows = {
             "show-aethelgard": Show(
                 id="show-aethelgard",
                 name="Chronicles of Aethelgard: Episode 6",
                 client="Cinefex Northern Pictures",
-                delivery_deadline=cycle_start + timedelta(hours=14.5),
+                delivery_deadline=round_to_quarter_hour(now + timedelta(hours=3.8333)),
                 penalty_daily_amount=25000.0,
                 penalty_currency="GBP",
                 critical_path=True,
@@ -101,11 +108,11 @@ class RenderFarmSimulator:
 
         # 3. Shots in flight with realistic studio workloads
         shots_data = [
-            # Aethelgard Critical Delivery (2,160 frames remaining at cycle start = 12.0h render baseline, +2.5h buffer, unmitigated throttle yields severe deficit)
-            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 2400, 240, 20.0, "node-07", ShotStatus.RENDERING, 10),
-            ("sh_142", "show-aethelgard", "SQ_DRAGON", "142", 200, 50, 18.0, "node-04", ShotStatus.RENDERING, 9),
-            ("sh_150", "show-aethelgard", "SQ_DRAGON", "150", 180, 30, 22.0, "node-01", ShotStatus.RENDERING, 8),
-            ("sh_155", "show-aethelgard", "SQ_THRONE", "155", 200, 0, 25.0, None, ShotStatus.QUEUED, 8),
+            # Aethelgard Critical Delivery (240 frames remaining = 1.33h render baseline, +2.5h buffer, unmitigated throttle yields -4.2h deficit)
+            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 300, 60, 20.0, "node-07", ShotStatus.RENDERING, 10),
+            ("sh_142", "show-aethelgard", "SQ_DRAGON", "142", 3400, 250, 18.0, "node-04", ShotStatus.RENDERING, 9),
+            ("sh_150", "show-aethelgard", "SQ_DRAGON", "150", 3200, 200, 22.0, "node-01", ShotStatus.RENDERING, 8),
+            ("sh_155", "show-aethelgard", "SQ_THRONE", "155", 3000, 100, 25.0, None, ShotStatus.QUEUED, 8),
             # Solarflare Show (Realistic ~18.5h workload across 4 active nodes -> +5.5h buffer)
             ("sh_201", "show-solarflare", "SQ_ORBIT", "201", 3800, 300, 19.0, "node-02", ShotStatus.RENDERING, 6),
             ("sh_204", "show-solarflare", "SQ_FLARE", "204", 3600, 200, 19.0, "node-03", ShotStatus.RENDERING, 6),
@@ -138,14 +145,6 @@ class RenderFarmSimulator:
 
         self.state.active_scenario = ScenarioType.BASELINE
 
-        # Burn-down sync for current time within cycle
-        t_elapsed = (now - cycle_start).total_seconds()
-        if "sh_118" in self.state.shots:
-            sh = self.state.shots["sh_118"]
-            rate = sh.estimated_seconds_per_frame
-            elapsed_frames = int(t_elapsed / max(1.0, rate))
-            sh.completed_frames = min(sh.total_frames - 20, 240 + elapsed_frames)
-
     def update_cycle_deadlines(self, now: Optional[datetime] = None) -> None:
         """
         Synchronizes show deadlines and in-flight progress with the current 6-hour cycle epoch.
@@ -162,16 +161,12 @@ class RenderFarmSimulator:
             self.reset_cycle(now)
             return
 
-        cycle_start_ts = epoch_seconds - (epoch_seconds % cycle_length_sec)
-        cycle_start = datetime.fromtimestamp(cycle_start_ts, tz=timezone.utc)
-        t_elapsed = (now - cycle_start).total_seconds()
-
-        # Synchronize in-flight shot completion with elapsed cycle time
+        # Within the current cycle epoch, the delivery deadline is held strictly fixed.
         if "sh_118" in self.state.shots:
             sh = self.state.shots["sh_118"]
-            rate = sh.estimated_seconds_per_frame
-            elapsed_frames = int(t_elapsed / max(1.0, rate))
-            sh.completed_frames = min(sh.total_frames - 20, 240 + elapsed_frames)
+            # Active shot batch in flight maintains 240 frames remaining
+            sh.total_frames = 300
+            sh.completed_frames = 60
 
     def inject_scenario(self, scenario: ScenarioType, target_temp: Optional[float] = None) -> None:
         """Injects a specific degradation scenario or restores baseline."""
@@ -181,10 +176,7 @@ class RenderFarmSimulator:
             # Degrade node-07 (rendering Shot 118 for Aethelgard delivery)
             node = self.state.nodes["node-07"]
             node.status = NodeStatus.THROTTLED
-            if target_temp is not None:
-                node.temperature_celsius = round(target_temp, 1)
-            else:
-                node.temperature_celsius = round(random.uniform(94.5, 96.5), 1)  # Exceeds 90C limit
+            node.temperature_celsius = round(target_temp, 1) if target_temp is not None else 95.9  # Exceeds 90C limit
             node.cpu_utilization = 99.0
             
             # Shot 118 frame render time jumps from 20s to 120s due to hardware down-throttling
@@ -215,7 +207,12 @@ class RenderFarmSimulator:
                 if shot.status == ShotStatus.AT_RISK:
                     shot.status = ShotStatus.RENDERING
 
-    def reallocate_shot(self, shot_id: str, target_node_id: str) -> dict:
+    def reallocate_shot(
+        self,
+        shot_id: str,
+        target_node_id: str,
+        source_temp: Optional[float] = None,
+    ) -> dict:
         """
         Intervention action: moves a shot from a degraded node to a target node (e.g. standby node-11).
         Quarantines the degraded node and restores clean render frame rate on the standby node.
@@ -236,6 +233,8 @@ class RenderFarmSimulator:
             prev_node.current_frame = None
             prev_node.status = NodeStatus.QUARANTINED
             prev_node.is_standby = False
+            if source_temp is not None:
+                prev_node.temperature_celsius = round(source_temp, 1)
 
         # Assign to target node
         shot.allocated_node_id = target_node_id
@@ -288,10 +287,8 @@ class RenderFarmSimulator:
             if not shot:
                 continue
 
-            # Check thermal variation
-            if node.status == NodeStatus.THROTTLED:
-                node.temperature_celsius = min(98.0, node.temperature_celsius + random.uniform(0.1, 0.4))
-            elif node.status == NodeStatus.HEALTHY:
+            # Check thermal variation (Hold temperature strictly constant during throttling incidents)
+            if node.status == NodeStatus.HEALTHY:
                 node.temperature_celsius = max(52.0, min(72.0, node.temperature_celsius + random.uniform(-0.5, 0.5)))
 
             # Advance frame render based on seconds_per_frame

@@ -212,9 +212,13 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
         penalty = s.penalty_daily_amount if hasattr(s, "penalty_daily_amount") else s.get("penalty_daily_amount", 25000.0)
 
         if isinstance(deadline, datetime):
-            deadline_str = deadline.strftime("%a, %d %b %Y %H:%M:%S UTC")
+            deadline_str = deadline.strftime("%a, %d %b %Y %H:%M UTC")
         else:
-            deadline_str = str(deadline)
+            try:
+                d_obj = datetime.fromisoformat(str(deadline).replace("Z", "+00:00"))
+                deadline_str = d_obj.strftime("%a, %d %b %Y %H:%M UTC")
+            except Exception:
+                deadline_str = str(deadline)
 
         if show_id == 'show-aethelgard':
             if is_intervened:
@@ -290,7 +294,7 @@ def render_ssr_trail(steps: list) -> str:
     return ''.join(entries)
 
 
-def render_ssr_fleet(nodes: dict) -> tuple[str, str]:
+def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, str]:
     node_list = list(nodes.values())
     if not node_list:
         return '<div>Loading node status...</div>', '10 Active / 2 Standby'
@@ -307,6 +311,16 @@ def render_ssr_fleet(nodes: dict) -> tuple[str, str]:
         is_standby = n.is_standby if hasattr(n, "is_standby") else n.get("is_standby", False)
         temp = n.temperature_celsius if hasattr(n, "temperature_celsius") else n.get("temperature_celsius", 55.0)
         shot_id = n.current_shot_id if hasattr(n, "current_shot_id") else n.get("current_shot_id")
+
+        # Ensure node-07 reads the locked incident temperature from evidence
+        if node_id == "node-07" and (status_val in ("QUARANTINED", "THROTTLED") or temp > 90.0):
+            if mission and mission.get("intervention_record"):
+                rec_ev = mission.get("intervention_record", {}).get("telemetry_evidence", {})
+                if "source_temp" in rec_ev:
+                    try:
+                        temp = float(rec_ev["source_temp"])
+                    except (ValueError, TypeError):
+                        pass
 
         if status_val == "QUARANTINED":
             quarantined_count += 1
@@ -893,7 +907,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 }
 
                 // Render Fleet Grid
-                renderFleet(data.nodes);
+                renderFleet(data.nodes, data.latest_mission);
 
             } catch (err) {
                 console.error("Failed to fetch farm state:", err);
@@ -924,7 +938,16 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     bufferMargin = '+9.4 hours';
                 }
 
-                const deadlineFormatted = new Date(s.delivery_deadline).toUTCString().replace(':00 GMT', ' UTC');
+                const dObj = new Date(s.delivery_deadline);
+                const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                const dayStr = dayNames[dObj.getUTCDay()];
+                const dateStr = String(dObj.getUTCDate()).padStart(2, '0');
+                const monStr = monthNames[dObj.getUTCMonth()];
+                const yrStr = dObj.getUTCFullYear();
+                const hrStr = String(dObj.getUTCHours()).padStart(2, '0');
+                const minStr = String(dObj.getUTCMinutes()).padStart(2, '0');
+                const deadlineFormatted = `${dayStr}, ${dateStr} ${monStr} ${yrStr} ${hrStr}:${minStr} UTC`;
 
                 return `
                     <div class="slate-card ${s.critical_path ? 'critical' : ''}">
@@ -964,7 +987,10 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
             if (mission.timestamp) {
                 const dateObj = new Date(mission.timestamp);
-                timeLabel.innerText = 'Last updated ' + dateObj.toLocaleTimeString() + ' (' + dateObj.toDateString() + ')';
+                const utcHours = String(dateObj.getUTCHours()).padStart(2, '0');
+                const utcMinutes = String(dateObj.getUTCMinutes()).padStart(2, '0');
+                const utcSeconds = String(dateObj.getUTCSeconds()).padStart(2, '0');
+                timeLabel.innerText = `Last completed mission: ${utcHours}:${utcMinutes}:${utcSeconds} UTC`;
             }
 
             container.innerHTML = formatMarkdown(mission.callsheet_briefing);
@@ -993,7 +1019,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             }).join('');
         }
 
-        function renderFleet(nodes) {
+        function renderFleet(nodes, latestMission) {
             const container = document.getElementById('fleet-container');
             const summaryLabel = document.getElementById('fleet-summary');
             const nodeList = Object.values(nodes);
@@ -1013,12 +1039,19 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 let nodeClass = 'node-tile';
                 let tempColor = 'var(--success)';
                 let shotLabel = 'Idle';
+                let tempVal = n.temperature_celsius;
+
+                if (n.id === 'node-07' && (n.status === 'QUARANTINED' || n.status === 'THROTTLED')) {
+                    if (latestMission && latestMission.intervention_record && latestMission.intervention_record.telemetry_evidence && latestMission.intervention_record.telemetry_evidence.source_temp) {
+                        tempVal = Number(latestMission.intervention_record.telemetry_evidence.source_temp);
+                    }
+                }
 
                 if (n.status === 'QUARANTINED') {
                     nodeClass += ' quarantined';
                     tempColor = 'var(--danger)';
                     shotLabel = 'Quarantined (Fault)';
-                } else if (n.status === 'THROTTLED' || n.temperature_celsius > 90) {
+                } else if (n.status === 'THROTTLED' || tempVal > 90) {
                     nodeClass += ' throttled';
                     tempColor = 'var(--danger)';
                     shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Degraded (Fault)';
@@ -1033,7 +1066,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 return `
                     <div class="${nodeClass}">
                         <div class="node-id">${n.id}</div>
-                        <div class="node-temp" style="color: ${tempColor};">${n.temperature_celsius.toFixed(1)}°C</div>
+                        <div class="node-temp" style="color: ${tempColor};">${tempVal.toFixed(1)}°C</div>
                         <div class="node-shot">${shotLabel}</div>
                     </div>
                 `;
@@ -1237,7 +1270,7 @@ async def get_producer_dashboard():
     )
 
     slate_html = render_ssr_slate(state.shows, mission)
-    fleet_html, fleet_summary = render_ssr_fleet(state.nodes)
+    fleet_html, fleet_summary = render_ssr_fleet(state.nodes, mission=mission)
 
     briefing_text = mission.get("callsheet_briefing", "") if mission else ""
     briefing_html = format_markdown_to_html(briefing_text)
@@ -1246,7 +1279,14 @@ async def get_producer_dashboard():
 
     timestamp = mission.get("timestamp", "") if mission else ""
     if timestamp:
-        time_label = f"Last updated {str(timestamp)[:19].replace('T', ' ')} UTC"
+        try:
+            if isinstance(timestamp, str):
+                ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            else:
+                ts_dt = timestamp
+            time_label = f"Last completed mission: {ts_dt.strftime('%H:%M:%S')} UTC"
+        except Exception:
+            time_label = f"Last completed mission: {str(timestamp)[:19].replace('T', ' ')} UTC"
     else:
         time_label = "Autonomous Watch Active"
 

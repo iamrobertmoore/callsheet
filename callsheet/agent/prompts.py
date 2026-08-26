@@ -39,6 +39,7 @@ SHOW: {show_name} (Client: {client})
 DEADLINE: {deadline}
 CONTRACTUAL DAILY PENALTY: {penalty_daily_amount} {penalty_currency}
 AFFECTED SHOTS: {affected_shots}
+HARDWARE TEMPERATURE: {hardware_temp}
 ROOT CAUSE: {root_cause}
 TELEMETRY EVIDENCE:
 - Metric: {metric_evidence}
@@ -56,6 +57,7 @@ INTERVENTION TAKEN:
 
 CRITICAL ACCURACY RULES:
 - The product name is 'Callsheet' (always use this exact spelling).
+- TEMPERATURE CONSISTENCY: State the junction temperature on {anomalous_node_id} strictly as {hardware_temp}. Do NOT mention 'peak' or invent secondary temperature numbers.
 - Quote the EXACT completion times ({unmitigated_completion} unmitigated vs {restored_completion} restored) and buffer margins ({unmitigated_buffer} deficit vs {restored_buffer} protected). Do NOT invent arbitrary timestamps.
 - Never use em dashes anywhere. Use colons, parentheses, or periods.
 - Never use emojis anywhere.

@@ -169,6 +169,7 @@ class FarmTelemetryEmitter:
                     frame_number=node.current_frame or 1105,
                     duration_seconds=120.0,
                     is_throttled=True,
+                    temperature_celsius=node.temperature_celsius,
                 )
 
         # 2. Emit active shot metrics (bounded set to prevent cardinality churn)
@@ -248,6 +249,7 @@ class FarmTelemetryEmitter:
         frame_number: int,
         duration_seconds: float,
         is_throttled: bool = False,
+        temperature_celsius: float | None = None,
     ) -> None:
         """
         Emits a detailed execution trace for a completed frame to Tempo via OTLP.
@@ -260,20 +262,24 @@ class FarmTelemetryEmitter:
         t_start_ns = int((now - duration_seconds) * 1e9)
         t_end_ns = int(now * 1e9)
 
+        root_attrs = {
+            "shot.code": shot_code,
+            "shot_code": shot_code,
+            "frame.number": frame_number,
+            "node.id": node_id,
+            "node_id": node_id,
+            "show.name": show_name,
+            "duration.seconds": duration_seconds,
+            "node.throttled": is_throttled,
+        }
+        if temperature_celsius is not None:
+            root_attrs["node.temperature_celsius"] = round(temperature_celsius, 1)
+
         # 1. Root span
         root_span = self.tracer.start_span(
             f"render_frame_sh{shot_code}_{frame_number}",
             start_time=t_start_ns,
-            attributes={
-                "shot.code": shot_code,
-                "shot_code": shot_code,
-                "frame.number": frame_number,
-                "node.id": node_id,
-                "node_id": node_id,
-                "show.name": show_name,
-                "duration.seconds": duration_seconds,
-                "node.throttled": is_throttled,
-            },
+            attributes=root_attrs,
         )
         ctx = trace.set_span_in_context(root_span)
 
@@ -316,6 +322,8 @@ class FarmTelemetryEmitter:
         if is_throttled:
             s2_attrs["warning"] = "CPU clock frequency throttled to 800MHz due to high thermal junction temp"
             s2_attrs["bottleneck"] = "hardware_thermal_throttle"
+            if temperature_celsius is not None:
+                s2_attrs["temperature_celsius"] = round(temperature_celsius, 1)
 
         s2 = self.tracer.start_span(
             "raytrace_volumetrics_pass",

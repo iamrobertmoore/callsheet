@@ -215,3 +215,75 @@ def test_cycle_reset_across_three_consecutive_boundaries():
         assert sim.state.nodes["node-12"].status == NodeStatus.STANDBY
         assert sim.state.nodes["node-12"].is_standby
 
+
+def test_unmitigated_deficit_magnitude_few_hours():
+    """
+    Proves that unmitigated delivery deficit under thermal throttling
+    is between -5.0 hours and -3.0 hours (a believable same-shift afternoon slip, not days).
+    """
+    from datetime import datetime, timezone, timedelta
+    from callsheet.farm.simulator import RenderFarmSimulator, ScenarioType
+
+    sim = RenderFarmSimulator()
+    now = datetime(2026, 8, 26, 14, 0, 0, tzinfo=timezone.utc)
+    sim.update_cycle_deadlines(now)
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+
+    shot = sim.state.shots["sh_118"]
+    show = sim.state.shows["show-aethelgard"]
+    deadline = show.delivery_deadline
+
+    # Throttled completion (120s/frame)
+    throttled_sec = shot.frames_remaining * shot.current_seconds_per_frame
+    throttled_completion = now + timedelta(seconds=throttled_sec)
+    unmitigated_buffer_hours = (deadline - throttled_completion).total_seconds() / 3600.0
+
+    # Restored completion (20s/frame)
+    normal_sec = shot.frames_remaining * shot.estimated_seconds_per_frame
+    restored_completion = now + timedelta(seconds=normal_sec)
+    restored_buffer_hours = (deadline - restored_completion).total_seconds() / 3600.0
+
+    assert -5.0 <= unmitigated_buffer_hours <= -3.0, (
+        f"Expected unmitigated deficit between -5.0h and -3.0h, got {unmitigated_buffer_hours:.1f}h"
+    )
+    assert 2.0 <= restored_buffer_hours <= 3.0, (
+        f"Expected restored buffer between +2.0h and +3.0h, got {restored_buffer_hours:.1f}h"
+    )
+
+
+def test_temperature_sampling_hold_during_throttling():
+    """
+    Proves that once junction temperature is sampled for a thermal throttling incident,
+    subsequent simulator ticks hold that exact single temperature constant without drift.
+    """
+    from callsheet.farm.simulator import RenderFarmSimulator, ScenarioType
+
+    sim = RenderFarmSimulator()
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING, target_temp=95.9)
+    node = sim.state.nodes["node-07"]
+    initial_temp = node.temperature_celsius
+    assert initial_temp == 95.9
+
+    # Run 10 ticks and verify temperature remains locked at 95.9
+    for _ in range(10):
+        sim.tick(delta_seconds=5.0)
+        assert node.temperature_celsius == 95.9, f"Temperature drifted from 95.9 to {node.temperature_celsius}"
+
+
+def test_all_active_nodes_rendering_no_premature_idle():
+    """
+    Proves that node-01, node-04, and all active rendering workers have sufficient frame
+    workloads and do not prematurely transition to Idle.
+    """
+    from callsheet.farm.simulator import RenderFarmSimulator
+
+    sim = RenderFarmSimulator()
+    for node_id in ["node-01", "node-04"]:
+        node = sim.state.nodes[node_id]
+        shot = sim.state.shots.get(node.current_shot_id)
+        assert shot is not None, f"Node {node_id} has no assigned shot"
+        assert shot.frames_remaining >= 1000, (
+            f"Node {node_id} shot {shot.id} only has {shot.frames_remaining} frames remaining"
+        )
+
+

@@ -8,6 +8,7 @@ intervention summaries using Vertex AI Gemini.
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 import uuid
@@ -221,12 +222,30 @@ class MultiStepMissionRunner:
         if not retrieved_log_lines:
             raise RuntimeError(f"Step 2 failed: No Loki log entries found for anomalous node {anomalous_node_id}.")
 
-        # Prioritize critical / warning / degraded lines on the anomalous node (select the most recent emitted log)
+        # Prioritize critical / warning / degraded lines on the anomalous node
         critical_logs = [
             l for l in retrieved_log_lines
             if any(k in l.upper() for k in ["CRITICAL", "DEGRADED", "THROTTL", "THERMAL", "WARN"])
         ]
-        quoted_log_evidence = critical_logs[-1] if critical_logs else retrieved_log_lines[-1]
+
+        # Correlate the specific log corresponding to the detected incident temperature
+        matching_logs = []
+        for l in critical_logs:
+            m = re.search(r"reached\s+([0-9]+(?:\.[0-9]+)?)\s*C", l)
+            if m and round(abs(float(m.group(1)) - round(max_temp, 1)), 1) <= 0.1:
+                matching_logs.append(l)
+        quoted_log_evidence = matching_logs[-1] if matching_logs else (critical_logs[-1] if critical_logs else retrieved_log_lines[-1])
+
+        # Coherence check: Verify that the temperature quoted in the Loki log matches the Prometheus sample
+        log_temp_match = re.search(r"reached\s+([0-9]+(?:\.[0-9]+)?)\s*C", quoted_log_evidence)
+        if log_temp_match:
+            log_temp = float(log_temp_match.group(1))
+            prom_temp = round(max_temp, 1)
+            if round(abs(log_temp - prom_temp), 1) > 0.1:
+                raise ValueError(
+                    f"Step 2 coherence check failed: Loki log temperature ({log_temp:.1f}°C) "
+                    f"does not match Prometheus sample ({prom_temp:.1f}°C)."
+                )
 
         # 2b. Query Tempo traces filtered strictly by the anomalous node and minimum throttled duration
         now_epoch = int(time.time())
@@ -270,18 +289,32 @@ class MultiStepMissionRunner:
         if not matched_trace:
             matched_trace = max(traces_list, key=lambda t: t.get("durationMs", 0))
 
-        trace_id = matched_trace.get("traceID")
+        raw_trace_id = str(matched_trace.get("traceID", "")).lower()
+        trace_id = raw_trace_id.zfill(32)
         root_trace_name = matched_trace.get("rootTraceName", "unknown")
         total_duration_ms = matched_trace.get("durationMs", 0)
 
-        trace_detail = await self._execute_mcp_tool(
-            toolset,
-            "grafana_api_request",
-            {
-                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/traces/{trace_id}",
-                "method": "GET",
-            }
-        )
+        # Query Tempo detail endpoint using padded trace_id (fallback to raw_trace_id if needed)
+        try:
+            trace_detail = await self._execute_mcp_tool(
+                toolset,
+                "grafana_api_request",
+                {
+                    "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/traces/{trace_id}",
+                    "method": "GET",
+                }
+            )
+            if not trace_detail.get("data", {}).get("batches"):
+                raise ValueError("Empty batches")
+        except Exception:
+            trace_detail = await self._execute_mcp_tool(
+                toolset,
+                "grafana_api_request",
+                {
+                    "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/traces/{raw_trace_id}",
+                    "method": "GET",
+                }
+            )
 
         # Parse child spans and isolate raytrace span duration
         child_spans = []
@@ -374,15 +407,15 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         # STEP 4: PRODUCTION IMPACT MAPPING
         # ---------------------------------------------------------
         now_dt = datetime.now(timezone.utc)
+        # Update simulation deadlines and burn-down for current time
+        self.dispatcher.simulator.update_cycle_deadlines(now_dt)
+
         show = self.dispatcher.simulator.state.shows.get(show_id)
         show_name = show.name if show else "Chronicles of Aethelgard: Episode 6"
         client_name = show.client if show else "Cinefex Northern Pictures"
         deadline_dt = show.delivery_deadline if show else now_dt + timedelta(hours=4.0)
         deadline_str = deadline_dt.strftime("%A %d %B, %H:%M UTC")
         penalty_str = f"£{show.penalty_daily_amount:,.0f} / day" if show else "£25,000 / day"
-
-        # Update simulation deadlines and burn-down for current time
-        self.dispatcher.simulator.update_cycle_deadlines(now_dt)
 
         # 1. Target shot selection: must be the active shot allocated to anomalous_node_id
         target_shot = None
@@ -474,6 +507,15 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             raise ValueError(
                 f"Coherence check failed: previous node ({intervention_record.previous_node_id}) does not match anomalous node ({anomalous_node_id})."
             )
+        log_temp_match = re.search(r"reached\s+([0-9]+(?:\.[0-9]+)?)\s*C", quoted_log_evidence)
+        if log_temp_match:
+            log_temp = float(log_temp_match.group(1))
+            prom_temp = round(max_temp, 1)
+            if round(abs(log_temp - prom_temp), 1) > 0.1:
+                raise ValueError(
+                    f"Coherence check failed: Loki log temperature ({log_temp:.1f}°C) "
+                    f"does not match Prometheus sample ({prom_temp:.1f}°C)."
+                )
 
         step5 = MissionStep(
             step_number=5,
@@ -511,6 +553,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             penalty_daily_amount=f"{show.penalty_daily_amount:,.0f}" if show else "25,000",
             penalty_currency="GBP",
             affected_shots=f"Shot {target_shot.shot_code} ({target_shot.sequence})",
+            hardware_temp=f"{max_temp:.1f}°C",
             root_cause=deduced_root_cause,
             anomalous_node_id=anomalous_node_id,
             metric_evidence=f"render_farm_node_temperature_celsius on {anomalous_node_id} reached {max_temp:.1f}°C",
@@ -543,7 +586,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
 
         briefing_text = response.text.strip()
         briefing_text = briefing_text.replace("Callshet", "Callsheet")
-        briefing_text = briefing_text.replace("—", " - ").replace("–", "-")
+        briefing_text = briefing_text.replace("\u2014", " - ").replace("\u2013", "-")
 
         step6 = MissionStep(
             step_number=6,

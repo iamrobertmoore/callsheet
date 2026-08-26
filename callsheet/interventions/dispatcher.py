@@ -46,7 +46,14 @@ class InterventionDispatcher:
         """
         Executes a shot reallocation from a failing node to a standby node.
         """
-        raw_result = self.simulator.reallocate_shot(shot_id, target_node_id)
+        source_temp = None
+        if telemetry_evidence and "source_temp" in telemetry_evidence:
+            try:
+                source_temp = float(telemetry_evidence["source_temp"])
+            except (ValueError, TypeError):
+                source_temp = None
+
+        raw_result = self.simulator.reallocate_shot(shot_id, target_node_id, source_temp=source_temp)
         shot = self.simulator.state.shots[shot_id]
 
         record = InterventionRecord(
