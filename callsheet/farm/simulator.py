@@ -31,30 +31,30 @@ class RenderFarmSimulator:
     def _initialize_farm(self) -> None:
         now = datetime.now(timezone.utc)
         
-        # 1. Shows with contractual delivery deadlines & daily penalties
+        # 1. Fictional original shows with contractual delivery deadlines & daily penalties
         self.state.shows = {
-            "show-dune": Show(
-                id="show-dune",
-                name="Dune: Part Three VFX",
-                client="Warner Bros / Legendary",
+            "show-aethelgard": Show(
+                id="show-aethelgard",
+                name="Chronicles of Aethelgard: Episode 6",
+                client="Cinefex Northern Pictures",
                 delivery_deadline=now + timedelta(hours=18),  # Tuesday deadline
                 penalty_daily_amount=25000.0,
                 penalty_currency="GBP",
                 critical_path=True,
             ),
-            "show-cyberpunk": Show(
-                id="show-cyberpunk",
-                name="Night City: Season 2",
-                client="Netflix Studios",
+            "show-solarflare": Show(
+                id="show-solarflare",
+                name="Solar Flare: Redux",
+                client="Solaris Media Works",
                 delivery_deadline=now + timedelta(hours=42),  # Thursday deadline
                 penalty_daily_amount=15000.0,
                 penalty_currency="GBP",
                 critical_path=False,
             ),
-            "show-commercial": Show(
-                id="show-commercial",
-                name="SuperBowl Teaser Spot",
-                client="Ogilvy UK",
+            "show-abyssal": Show(
+                id="show-abyssal",
+                name="Abyssal Trench 3D",
+                client="Submarine Post London",
                 delivery_deadline=now + timedelta(hours=68),  # Friday deadline
                 penalty_daily_amount=10000.0,
                 penalty_currency="GBP",
@@ -86,20 +86,20 @@ class RenderFarmSimulator:
 
         # 3. Shots in flight (including critical shots 118 and 142)
         shots_data = [
-            # Dune Critical Delivery (Tuesday)
-            ("sh_118", "show-dune", "SQ_SAND", "118", 120, 24, 20.0, "node-07", ShotStatus.RENDERING, 10),
-            ("sh_142", "show-dune", "SQ_ORNI", "142", 150, 45, 18.0, "node-04", ShotStatus.RENDERING, 9),
-            ("sh_150", "show-dune", "SQ_ORNI", "150", 90, 12, 22.0, "node-01", ShotStatus.RENDERING, 8),
-            ("sh_155", "show-dune", "SQ_BATTLE", "155", 200, 0, 25.0, None, ShotStatus.QUEUED, 8),
-            # Cyberpunk Show
-            ("sh_201", "show-cyberpunk", "SQ_ALLEY", "201", 100, 60, 16.0, "node-02", ShotStatus.RENDERING, 6),
-            ("sh_204", "show-cyberpunk", "SQ_CLUB", "204", 80, 20, 19.0, "node-03", ShotStatus.RENDERING, 6),
-            ("sh_208", "show-cyberpunk", "SQ_CHASE", "208", 160, 40, 21.0, "node-05", ShotStatus.RENDERING, 5),
-            ("sh_212", "show-cyberpunk", "SQ_NET", "212", 110, 10, 17.0, "node-06", ShotStatus.RENDERING, 5),
-            # Commercial Show
-            ("sh_301", "show-commercial", "SQ_HERO", "301", 75, 50, 15.0, "node-08", ShotStatus.RENDERING, 4),
-            ("sh_302", "show-commercial", "SQ_PACK", "302", 90, 30, 18.0, "node-09", ShotStatus.RENDERING, 4),
-            ("sh_303", "show-commercial", "SQ_END", "303", 60, 15, 14.0, "node-10", ShotStatus.RENDERING, 3),
+            # Aethelgard Critical Delivery (Tuesday)
+            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 120, 24, 20.0, "node-07", ShotStatus.RENDERING, 10),
+            ("sh_142", "show-aethelgard", "SQ_DRAGON", "142", 150, 45, 18.0, "node-04", ShotStatus.RENDERING, 9),
+            ("sh_150", "show-aethelgard", "SQ_DRAGON", "150", 90, 12, 22.0, "node-01", ShotStatus.RENDERING, 8),
+            ("sh_155", "show-aethelgard", "SQ_THRONE", "155", 200, 0, 25.0, None, ShotStatus.QUEUED, 8),
+            # Solarflare Show
+            ("sh_201", "show-solarflare", "SQ_ORBIT", "201", 100, 60, 16.0, "node-02", ShotStatus.RENDERING, 6),
+            ("sh_204", "show-solarflare", "SQ_FLARE", "204", 80, 20, 19.0, "node-03", ShotStatus.RENDERING, 6),
+            ("sh_208", "show-solarflare", "SQ_EVAC", "208", 160, 40, 21.0, "node-05", ShotStatus.RENDERING, 5),
+            ("sh_212", "show-solarflare", "SQ_BASE", "212", 110, 10, 17.0, "node-06", ShotStatus.RENDERING, 5),
+            # Abyssal Trench Show
+            ("sh_301", "show-abyssal", "SQ_DIVE", "301", 75, 50, 15.0, "node-08", ShotStatus.RENDERING, 4),
+            ("sh_302", "show-abyssal", "SQ_CREATURE", "302", 90, 30, 18.0, "node-09", ShotStatus.RENDERING, 4),
+            ("sh_303", "show-abyssal", "SQ_SURFACE", "303", 60, 15, 14.0, "node-10", ShotStatus.RENDERING, 3),
         ]
 
         self.state.shots = {}
@@ -126,13 +126,13 @@ class RenderFarmSimulator:
         self.state.active_scenario = scenario
         
         if scenario == ScenarioType.THERMAL_THROTTLING:
-            # Degrade node-07 (rendering Shot 118 for Tuesday Dune delivery)
+            # Degrade node-07 (rendering Shot 118 for Tuesday Aethelgard delivery)
             node = self.state.nodes["node-07"]
             node.status = NodeStatus.THROTTLED
             node.temperature_celsius = 94.5  # Exceeds 90C limit
             node.cpu_utilization = 99.0
             
-            # Shot 118 frame render time triples from 20s to 120s due to clock down-throttling
+            # Shot 118 frame render time jumps from 20s to 120s due to hardware down-throttling
             shot = self.state.shots.get("sh_118")
             if shot:
                 shot.current_seconds_per_frame = 120.0
@@ -237,7 +237,6 @@ class RenderFarmSimulator:
                 node.temperature_celsius = max(52.0, min(72.0, node.temperature_celsius + random.uniform(-0.5, 0.5)))
 
             # Advance frame render based on seconds_per_frame
-            # Probability of frame completion in this tick
             prob_complete = delta_seconds / max(1.0, shot.current_seconds_per_frame)
             if random.random() < prob_complete and shot.completed_frames < shot.total_frames:
                 shot.completed_frames += 1

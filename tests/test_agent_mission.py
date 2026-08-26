@@ -1,5 +1,6 @@
 """
-Tests for Callsheet Multi-Step Mission Runner and Vertex AI Gemini synthesis.
+Tests for Callsheet Multi-Step Mission Runner, Grafana Cloud MCP data-driven reasoning,
+and failure modes when Grafana is unreachable.
 """
 
 import os
@@ -9,6 +10,7 @@ import pytest
 from dotenv import load_dotenv
 
 from callsheet.agent.mission import MultiStepMissionRunner
+from callsheet.farm.emitter import FarmTelemetryEmitter
 from callsheet.farm.models import ScenarioType
 from callsheet.farm.simulator import RenderFarmSimulator
 from callsheet.interventions.dispatcher import InterventionDispatcher
@@ -17,25 +19,45 @@ load_dotenv()
 
 
 @pytest.mark.asyncio
-async def test_full_six_step_mission_execution():
+async def test_full_six_step_mission_against_live_grafana():
     """
-    Executes a complete 6-step mission:
-    1. Injects thermal throttling on simulator.
-    2. Spawns mcp-grafana server.
-    3. Runs MultiStepMissionRunner (MCP telemetry queries + Vertex AI Gemini summary).
-    4. Asserts all 6 steps completed and producer briefing generated.
+    1. Injects thermal throttling on simulator and emits live telemetry to Grafana Cloud via OTLP.
+    2. Spawns mcp-grafana server locally.
+    3. Runs MultiStepMissionRunner which strictly parses the Prometheus response,
+       queries Loki logs for that node, has Gemini 2.5 deduce the root cause,
+       reallocates the shot to standby node-12, and synthesizes the producer briefing.
+    4. Asserts all 6 steps completed based on real retrieved data.
     """
-    # 1. Setup simulator and dispatcher
     sim = RenderFarmSimulator()
     sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    emitter = FarmTelemetryEmitter(sim)
+
+    # Emit telemetry into Grafana Cloud
+    emitter.emit_metrics_tick()
+    events = sim.tick(delta_seconds=30.0)
+    emitter.process_events(events)
+    emitter.emit_log(
+        "CRITICAL: Thermal junction temperature on node-07 reached 94.5C. Render task for shot 118 throttled.",
+        level="WARN",
+        node_id="node-07",
+        shot_code="118",
+        show_id="show-aethelgard",
+        frame_number=1025,
+    )
+    emitter.metric_reader.force_flush()
+    emitter.logger_provider.force_flush()
+    emitter.tracer_provider.force_flush()
+
+    # Wait briefly for Grafana Cloud indexing
+    time.sleep(5)
+
     dispatcher = InterventionDispatcher(sim)
 
-    # 2. Spawn mcp-grafana server locally
     mcp_bin = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin", "mcp-grafana"))
     if not os.path.exists(mcp_bin):
         pytest.skip(f"mcp-grafana binary not found at {mcp_bin}")
 
-    port = 8129
+    port = 8139
     server_url = f"http://127.0.0.1:{port}/mcp"
     env = os.environ.copy()
 
@@ -60,7 +82,6 @@ async def test_full_six_step_mission_execution():
         assert proc.poll() is None, "mcp-grafana failed to start"
 
         runner = MultiStepMissionRunner(
-            simulator=sim,
             dispatcher=dispatcher,
             mcp_server_url=server_url,
             project_id="agent-attest-2026",
@@ -68,21 +89,23 @@ async def test_full_six_step_mission_execution():
             model_name="gemini-2.5-flash",
         )
 
-        result = await runner.execute_mission(show_id="show-dune")
+        result = await runner.execute_mission(show_id="show-aethelgard")
 
-        # Verify mission structure
-        assert result.show_id == "show-dune"
+        # Verify mission structure and genuine data extraction
+        assert result.show_id == "show-aethelgard"
+        assert result.anomalous_node_id == "node-07"
         assert len(result.steps) == 6
         assert result.intervention_record is not None
+        assert result.intervention_record.previous_node_id == "node-07"
         assert result.intervention_record.target_node_id == "node-12"
         assert result.intervention_record.status == "PROTECTED"
         assert len(result.callsheet_briefing) > 50
 
-        print("\n=== GENERATED CALLSHEET BRIEFING ===")
-        print(result.callsheet_briefing)
-
-        # Assert no em dashes in briefing text
+        # Assert no em dashes in briefing
         assert "—" not in result.callsheet_briefing, "Briefing must not contain em dashes"
+
+        print("\n=== LIVE GENERATED CALLSHEET BRIEFING ===")
+        print(result.callsheet_briefing)
 
     finally:
         proc.terminate()
@@ -90,3 +113,31 @@ async def test_full_six_step_mission_execution():
             proc.wait(timeout=3)
         except Exception:
             proc.kill()
+
+
+@pytest.mark.asyncio
+async def test_mission_fails_when_grafana_unreachable():
+    """
+    THE RIP-OUT TEST:
+    Points the mission runner at a non-existent / dead Grafana endpoint.
+    Asserts that the mission fails with an exception and does NOT complete.
+    """
+    sim = RenderFarmSimulator()
+    dispatcher = InterventionDispatcher(sim)
+
+    # Point at unreachable endpoint
+    dead_server_url = "http://127.0.0.1:9999/mcp"
+
+    runner = MultiStepMissionRunner(
+        dispatcher=dispatcher,
+        mcp_server_url=dead_server_url,
+        project_id="agent-attest-2026",
+        location="us-central1",
+        model_name="gemini-2.5-flash",
+    )
+
+    with pytest.raises((ConnectionError, RuntimeError)) as excinfo:
+        await runner.execute_mission(show_id="show-aethelgard")
+
+    assert "Grafana MCP transport error" in str(excinfo.value) or "error" in str(excinfo.value).lower()
+    print(f"\nSuccessfully verified mission failure on dead Grafana: {excinfo.value}")

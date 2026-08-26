@@ -24,7 +24,6 @@ simulator = RenderFarmSimulator()
 worker = FarmWorker(simulator=simulator, tick_interval_seconds=5.0)
 dispatcher = InterventionDispatcher(simulator=simulator)
 mission_runner = MultiStepMissionRunner(
-    simulator=simulator,
     dispatcher=dispatcher,
     project_id=os.getenv("GOOGLE_CLOUD_PROJECT", "agent-attest-2026"),
     location=os.getenv("GOOGLE_CLOUD_REGION", "us-central1"),
@@ -62,7 +61,7 @@ class ScenarioRequest(BaseModel):
 
 
 class MissionRequest(BaseModel):
-    show_id: Optional[str] = "show-dune"
+    show_id: Optional[str] = "show-aethelgard"
 
 
 @app.get("/api/health")
@@ -537,7 +536,7 @@ Click <strong>"Investigate & Intervene"</strong> to trigger the multi-step reaso
                 const res = await fetch('/api/mission', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ show_id: 'show-dune' })
+                    body: JSON.stringify({ show_id: 'show-aethelgard' })
                 });
                 const result = await res.json();
 
