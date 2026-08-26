@@ -70,6 +70,16 @@ else
     echo "PASS: Empty repository, no commits yet."
 fi
 
+echo "Check 4: Em-dash hygiene in project source files and documentation..."
+EM_DASH_MATCHES=$(git grep -F "—" -- 'callsheet/*' 'README.md' 'scripts/*' ':(exclude)scripts/hygiene_check.sh' || true)
+if [ -n "$EM_DASH_MATCHES" ]; then
+    echo "ERROR: Found forbidden em-dash in project source files:"
+    echo "$EM_DASH_MATCHES"
+    FAIL=1
+else
+    echo "PASS: No em-dashes found in project source code or documentation."
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     echo "=== HYGIENE CHECKS FAILED ==="
     exit 1
