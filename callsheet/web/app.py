@@ -108,7 +108,7 @@ async def inject_scenario(req: ScenarioRequest):
 async def run_mission(req: MissionRequest):
     """Executes the 6-step observability to intervention mission."""
     try:
-        result = await mission_runner.execute_mission(show_id=req.show_id or "show-dune")
+        result = await mission_runner.execute_mission(show_id=req.show_id or "show-aethelgard")
         return result.model_dump(mode="json")
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
