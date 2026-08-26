@@ -44,13 +44,34 @@ TELEMETRY EVIDENCE:
 - Metric: {metric_evidence}
 - Log: {log_evidence}
 - Trace: {trace_evidence}
-UNMITIGATED IMPACT WITHOUT INTERVENTION: {unmitigated_impact}
-INTERVENTION TAKEN: {intervention_taken}
-PROJECTED BUFFER RESTORED: {projected_buffer}
+UNMITIGATED IMPACT WITHOUT INTERVENTION:
+- Throttled Render Rate: {throttled_rate} per frame
+- Unmitigated Projected Completion: {unmitigated_completion}
+- Unmitigated Deficit: {unmitigated_buffer} ({unmitigated_hours_late} hours past deadline, triggering {penalty_daily_amount} {penalty_currency} daily penalty)
+INTERVENTION TAKEN:
+- Workload Reallocated: {intervention_taken}
+- Restored Render Rate: {restored_rate} per frame
+- Restored Projected Completion: {restored_completion}
+- Restored Buffer Margin: {restored_buffer} before deadline (saving the full {penalty_daily_amount} {penalty_currency} daily penalty)
+
+CRITICAL ACCURACY RULES:
+- The product name is 'Callsheet' (always use this exact spelling).
+- Quote the EXACT completion times ({unmitigated_completion} unmitigated vs {restored_completion} restored) and buffer margins ({unmitigated_buffer} deficit vs {restored_buffer} protected). Do NOT invent arbitrary timestamps.
+- Never use em dashes anywhere. Use colons, parentheses, or periods.
+- Never use emojis anywhere.
 
 Format the response strictly with:
-1. STATUS HEADLINE (State clearly that the delivery deadline is protected following automated failover)
-2. EXECUTIVE SUMMARY (Explain what happened, contrast the unmitigated negative buffer slippage and penalty risk with the restored positive buffer, and state the exact avoided penalty)
-3. SHOT BREAKDOWN TABLE (Shot Code, Previous Node, Target Node, Frames Remaining, New Completion Time, Buffer Margin)
-4. TELEMETRY AUDIT TRAIL (Brief citation of the Prometheus metric, Loki log message on the anomalous node, and Tempo trace span that proved the cause)
+### 1. STATUS HEADLINE
+State clearly that the delivery deadline is protected following automated failover.
+
+### 2. EXECUTIVE SUMMARY
+Explain the thermal failure on {anomalous_node_id}, contrast the unmitigated late completion ({unmitigated_completion}, {unmitigated_buffer} deficit) with the restored completion ({restored_completion}, {restored_buffer} margin), and confirm the avoided {penalty_daily_amount} {penalty_currency} daily penalty.
+
+### 3. SHOT BREAKDOWN TABLE
+Markdown table with headers:
+| Show Name | Shot Code | Previous Node | Target Node | Frames Remaining | Projected Delivery | Buffer Margin |
+Use the exact values: Shot {shot_code}, {previous_node} to {target_node}, {frames_remaining} frames, {restored_completion}, {restored_buffer}.
+
+### 4. TELEMETRY AUDIT TRAIL
+Bullet list citing the exact Prometheus metric, Loki log message, and Tempo trace span from the evidence above.
 """

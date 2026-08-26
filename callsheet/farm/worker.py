@@ -136,14 +136,11 @@ class FarmWorker:
                 self.simulator.update_cycle_deadlines()
 
                 # Handle cycle rollover
-                if self._last_cycle_epoch is None:
-                    self._last_cycle_epoch = current_epoch
-                    # Prime thermal throttling for the initial cycle
-                    self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
-                elif current_epoch != self._last_cycle_epoch:
-                    logger.info("New 6-hour cycle epoch (%d) started. Re-arming anomaly...", current_epoch)
+                if self._last_cycle_epoch is None or current_epoch != self._last_cycle_epoch:
+                    logger.info("Cycle epoch change (epoch: %d). Performing full farm reset and priming scenario...", current_epoch)
                     self._last_cycle_epoch = current_epoch
                     self._last_investigated_node = None
+                    self.simulator.reset_cycle()
                     self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
 
                 # 1. Advance simulation state

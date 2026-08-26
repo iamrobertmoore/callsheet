@@ -154,3 +154,64 @@ async def test_server_side_rendering_zero_empty_state():
     assert "Active Delivery Slate" in html
     assert "Production Callsheet Briefing" in html
 
+
+def test_cycle_reset_across_three_consecutive_boundaries():
+    """
+    Proves that across three consecutive 6-hour cycle epochs:
+    1. At the start of each cycle, the farm is cleanly reset: 10 Active (all Healthy), 2 Standby (node-11, node-12), 0 Quarantined.
+    2. Shot 118 is consistently assigned to node-07 at 20.0s/frame.
+    3. An incident in Cycle N (reallocating Shot 118 to node-11 and quarantining node-07) NEVER leaks into Cycle N+1.
+    4. No healthy node is ever quarantined in subsequent cycles.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    sim = RenderFarmSimulator()
+    t0 = datetime(2026, 8, 26, 0, 0, 0, tzinfo=timezone.utc)
+
+    for cycle_index in range(3):
+        cycle_time = t0 + timedelta(hours=6.0 * cycle_index)
+
+        # 1. Update cycle clock to boundary
+        sim.update_cycle_deadlines(cycle_time)
+
+        # 2. Assert clean state at start of cycle
+        active_nodes = [n for n in sim.state.nodes.values() if not n.is_standby and n.status == NodeStatus.HEALTHY]
+        standby_nodes = [n for n in sim.state.nodes.values() if n.is_standby and n.status == NodeStatus.STANDBY]
+        quarantined_nodes = [n for n in sim.state.nodes.values() if n.status == NodeStatus.QUARANTINED]
+
+        assert len(active_nodes) == 10, f"Cycle {cycle_index+1}: Expected 10 active healthy nodes, got {len(active_nodes)}"
+        assert len(standby_nodes) == 2, f"Cycle {cycle_index+1}: Expected 2 standby nodes, got {len(standby_nodes)}"
+        assert len(quarantined_nodes) == 0, f"Cycle {cycle_index+1}: Expected 0 quarantined nodes, got {len(quarantined_nodes)}"
+
+        # Assert node-07 is healthy and assigned to Shot 118
+        node07 = sim.state.nodes["node-07"]
+        assert node07.status == NodeStatus.HEALTHY
+        assert not node07.is_standby
+        assert sim.state.shots["sh_118"].allocated_node_id == "node-07"
+        assert sim.state.shots["sh_118"].estimated_seconds_per_frame == 20.0
+
+        # Assert node-11 and node-12 are standby spares
+        assert sim.state.nodes["node-11"].status == NodeStatus.STANDBY
+        assert sim.state.nodes["node-11"].is_standby
+        assert sim.state.nodes["node-12"].status == NodeStatus.STANDBY
+        assert sim.state.nodes["node-12"].is_standby
+
+        # 3. Simulate degradation scenario during the cycle
+        sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+        assert sim.state.nodes["node-07"].status == NodeStatus.THROTTLED
+        assert sim.state.shots["sh_118"].current_seconds_per_frame == 120.0
+
+        # 4. Execute automated failover to standby node-11
+        result = sim.reallocate_shot("sh_118", "node-11")
+        assert result["status"] == "PROTECTED"
+        assert result["previous_node"] == "node-07"
+        assert result["target_node"] == "node-11"
+        assert result["buffer_margin_hours"] >= 2.0
+
+        # 5. Assert post-intervention state within the cycle
+        assert sim.state.nodes["node-07"].status == NodeStatus.QUARANTINED
+        assert sim.state.nodes["node-11"].status == NodeStatus.HEALTHY
+        assert not sim.state.nodes["node-11"].is_standby
+        assert sim.state.nodes["node-12"].status == NodeStatus.STANDBY
+        assert sim.state.nodes["node-12"].is_standby
+

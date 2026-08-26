@@ -155,7 +155,7 @@ class MultiStepMissionRunner:
             for item in series_list:
                 metric_meta = item.get("metric", {})
                 val_tuple = item.get("value", [0, "0"])
-                node = metric_meta.get("node_id", "unknown")
+                node = metric_meta.get("node_id") or metric_meta.get("node") or metric_meta.get("exported_node_id") or "unknown"
                 try:
                     temp = float(val_tuple[1])
                 except (ValueError, IndexError):
@@ -179,6 +179,7 @@ class MultiStepMissionRunner:
             raise RuntimeError(
                 f"Step 1 failed: No node exceeded the 90.0°C thermal limit in Prometheus. Temperatures: {all_node_temps}"
             )
+        logger.info("Step 1 detected anomalous_node_id=%s with temp=%.1fC", anomalous_node_id, max_temp)
 
         step1 = MissionStep(
             step_number=1,
@@ -383,12 +384,20 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         # Update simulation deadlines and burn-down for current time
         self.dispatcher.simulator.update_cycle_deadlines(now_dt)
 
-        # Find shots allocated to the degraded node dynamically
-        affected_shots = [
-            s for s in self.dispatcher.simulator.state.shots.values()
-            if s.allocated_node_id == anomalous_node_id or s.status == "AT_RISK" or s.id == "sh_118"
-        ]
-        target_shot = affected_shots[0] if affected_shots else list(self.dispatcher.simulator.state.shots.values())[0]
+        # 1. Target shot selection: must be the active shot allocated to anomalous_node_id
+        target_shot = None
+        for s in self.dispatcher.simulator.state.shots.values():
+            if s.allocated_node_id == anomalous_node_id:
+                target_shot = s
+                break
+        if not target_shot:
+            # Check for any shot belonging to the show that is AT_RISK or on anomalous node
+            for s in self.dispatcher.simulator.state.shots.values():
+                if s.show_id == show_id and (s.allocated_node_id == anomalous_node_id or s.status == "AT_RISK"):
+                    target_shot = s
+                    break
+        if not target_shot:
+            raise RuntimeError(f"Step 4 failed: No active shot allocated to anomalous node {anomalous_node_id}.")
 
         frames_rem = target_shot.frames_remaining
         throttled_sec = target_shot.current_seconds_per_frame
@@ -445,6 +454,27 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             },
         )
 
+        # ---------------------------------------------------------
+        # COHERENCE CHECK GATE
+        # Enforces mathematical consistency across all telemetry signals before Gemini briefing generation
+        # ---------------------------------------------------------
+        if unmitigated_buffer_hours >= 0:
+            raise ValueError(
+                f"Coherence check failed: unmitigated buffer margin ({unmitigated_buffer_hours:.1f}h) must be negative during a thermal failure."
+            )
+        if throttled_sec <= normal_sec:
+            raise ValueError(
+                f"Coherence check failed: throttled render rate ({throttled_sec:.1f}s) must be greater than baseline rate ({normal_sec:.1f}s)."
+            )
+        if intervention_record.buffer_margin_hours <= unmitigated_buffer_hours:
+            raise ValueError(
+                f"Coherence check failed: restored buffer ({intervention_record.buffer_margin_hours:.1f}h) must be greater than unmitigated deficit ({unmitigated_buffer_hours:.1f}h)."
+            )
+        if intervention_record.previous_node_id != anomalous_node_id:
+            raise ValueError(
+                f"Coherence check failed: previous node ({intervention_record.previous_node_id}) does not match anomalous node ({anomalous_node_id})."
+            )
+
         step5 = MissionStep(
             step_number=5,
             name="Workload Reallocation Intervention",
@@ -467,6 +497,13 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         # ---------------------------------------------------------
         # STEP 6: PRODUCER CALLSHEET BRIEFING (Vertex AI Gemini)
         # ---------------------------------------------------------
+        restored_completion_dt = datetime.fromisoformat(intervention_record.projected_completion)
+        restored_completion_str = restored_completion_dt.strftime("%A %d %B, %H:%M UTC")
+        unmitigated_completion_str = unmitigated_completion_dt.strftime("%A %d %B, %H:%M UTC")
+        unmitigated_hours_late_str = f"{abs(unmitigated_buffer_hours):.1f}"
+        restored_buffer_str = f"+{intervention_record.buffer_margin_hours:.1f} hours"
+        unmitigated_buffer_str = f"{unmitigated_buffer_hours:.1f} hours"
+
         prompt_content = CALLSHEET_SUMMARY_PROMPT_TEMPLATE.format(
             show_name=show_name,
             client=client_name,
@@ -475,12 +512,22 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             penalty_currency="GBP",
             affected_shots=f"Shot {target_shot.shot_code} ({target_shot.sequence})",
             root_cause=deduced_root_cause,
+            anomalous_node_id=anomalous_node_id,
             metric_evidence=f"render_farm_node_temperature_celsius on {anomalous_node_id} reached {max_temp:.1f}°C",
             log_evidence=f"Loki log: {quoted_log_evidence}",
             trace_evidence=f"Tempo raytrace span: {quoted_trace_evidence}",
-            unmitigated_impact=f"Projected completion at {unmitigated_completion_dt.strftime('%H:%M UTC')} ({unmitigated_buffer_hours:.1f} hours buffer, {abs(unmitigated_buffer_hours):.1f} hours past deadline), triggering {penalty_str} penalty",
-            intervention_taken=f"Shot {target_shot.shot_code} migrated from {anomalous_node_id} to standby spare {chosen_standby_node} (quarantined {anomalous_node_id}); restored {normal_sec:.0f}s/frame render rate",
-            projected_buffer=f"+{intervention_record.buffer_margin_hours:.1f} hours margin before deadline (completed by {intervention_record.projected_completion})",
+            throttled_rate=f"{throttled_sec:.0f}s",
+            unmitigated_completion=unmitigated_completion_str,
+            unmitigated_buffer=unmitigated_buffer_str,
+            unmitigated_hours_late=unmitigated_hours_late_str,
+            intervention_taken=f"Shot {target_shot.shot_code} migrated from {anomalous_node_id} to standby spare {chosen_standby_node} (quarantined {anomalous_node_id})",
+            restored_rate=f"{normal_sec:.0f}s",
+            restored_completion=restored_completion_str,
+            restored_buffer=restored_buffer_str,
+            shot_code=target_shot.shot_code,
+            previous_node=anomalous_node_id,
+            target_node=chosen_standby_node,
+            frames_remaining=frames_rem,
         )
 
         response = self.genai_client.models.generate_content(

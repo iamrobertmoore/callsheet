@@ -26,13 +26,16 @@ class RenderFarmSimulator:
     def __init__(self, seed: int = 42):
         random.seed(seed)
         self.state = FarmState()
-        self._initialize_farm()
+        self._current_cycle_epoch: Optional[int] = None
+        self.reset_cycle()
 
-    def update_cycle_deadlines(self, now: Optional[datetime] = None) -> None:
+    def reset_cycle(self, now: Optional[datetime] = None) -> None:
         """
-        Anchors show deadlines and active workloads to a rolling 6-hour cycle epoch.
-        Within each 6-hour cycle (00:00, 06:00, 12:00, 18:00 UTC), deadlines and buffer margins
-        remain stable and positive throughout the full cycle.
+        Completely resets the render farm to a pristine, nominal baseline at the start of a 6-hour cycle:
+        - All 12 nodes restored (10 active healthy workers at nominal ~58-68C, 2 standby spares node-11 & node-12 at 42C).
+        - Quarantines cleared (0 quarantined nodes).
+        - All shots restored to initial baseline node assignments (Shot 118 on node-07).
+        - Deadlines and frame completion counts cleanly initialized for the cycle epoch.
         """
         now = now or datetime.now(timezone.utc)
         self.state.last_updated = now
@@ -40,40 +43,16 @@ class RenderFarmSimulator:
         cycle_length_sec = 6 * 3600  # 6 hours
         cycle_start_ts = epoch_seconds - (epoch_seconds % cycle_length_sec)
         cycle_start = datetime.fromtimestamp(cycle_start_ts, tz=timezone.utc)
-        t_elapsed = (now - cycle_start).total_seconds()
+        self._current_cycle_epoch = int(epoch_seconds // cycle_length_sec)
 
-        # Deadlines anchored to cycle_start with fixed contractual buffer margins:
-        # Aethelgard: cycle_start + 8.8 hours (holds steady +2.8h buffer throughout cycle)
-        # Solar Flare: cycle_start + 24.0 hours (holds steady +5.5h buffer)
-        # Abyssal Trench: cycle_start + 48.0 hours (holds steady +9.4h buffer)
-        if "show-aethelgard" in self.state.shows:
-            self.state.shows["show-aethelgard"].delivery_deadline = cycle_start + timedelta(hours=8.8)
-        if "show-solarflare" in self.state.shows:
-            self.state.shows["show-solarflare"].delivery_deadline = cycle_start + timedelta(hours=24.0)
-        if "show-abyssal" in self.state.shows:
-            self.state.shows["show-abyssal"].delivery_deadline = cycle_start + timedelta(hours=48.0)
-
-        # Synchronize in-flight shot completion with elapsed cycle time so work burns down in step with the clock
-        if "sh_118" in self.state.shots:
-            sh = self.state.shots["sh_118"]
-            rate = sh.estimated_seconds_per_frame
-            elapsed_frames = int(t_elapsed / max(1.0, rate))
-            sh.completed_frames = min(sh.total_frames - 20, 120 + elapsed_frames)
-
-    def _initialize_farm(self) -> None:
-        now = datetime.now(timezone.utc)
-        epoch_seconds = int(now.timestamp())
-        cycle_length_sec = 6 * 3600  # 6 hours
-        cycle_start_ts = epoch_seconds - (epoch_seconds % cycle_length_sec)
-        cycle_start = datetime.fromtimestamp(cycle_start_ts, tz=timezone.utc)
-        
-        # 1. Fictional original shows with contractual delivery deadlines & daily penalties
+        # 1. Shows with contractual delivery deadlines & daily penalties
+        # Aethelgard deadline is fixed at cycle_start + 8.5 hours
         self.state.shows = {
             "show-aethelgard": Show(
                 id="show-aethelgard",
                 name="Chronicles of Aethelgard: Episode 6",
                 client="Cinefex Northern Pictures",
-                delivery_deadline=cycle_start + timedelta(hours=8.8),
+                delivery_deadline=cycle_start + timedelta(hours=14.5),
                 penalty_daily_amount=25000.0,
                 penalty_currency="GBP",
                 critical_path=True,
@@ -122,8 +101,8 @@ class RenderFarmSimulator:
 
         # 3. Shots in flight with realistic studio workloads
         shots_data = [
-            # Aethelgard Critical Delivery (1,080 frames remaining = 6.0h render baseline, +2.8h buffer)
-            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 1200, 120, 20.0, "node-07", ShotStatus.RENDERING, 10),
+            # Aethelgard Critical Delivery (2,160 frames remaining at cycle start = 12.0h render baseline, +2.5h buffer, unmitigated throttle yields severe deficit)
+            ("sh_118", "show-aethelgard", "SQ_SIEGE", "118", 2400, 240, 20.0, "node-07", ShotStatus.RENDERING, 10),
             ("sh_142", "show-aethelgard", "SQ_DRAGON", "142", 200, 50, 18.0, "node-04", ShotStatus.RENDERING, 9),
             ("sh_150", "show-aethelgard", "SQ_DRAGON", "150", 180, 30, 22.0, "node-01", ShotStatus.RENDERING, 8),
             ("sh_155", "show-aethelgard", "SQ_THRONE", "155", 200, 0, 25.0, None, ShotStatus.QUEUED, 8),
@@ -157,7 +136,42 @@ class RenderFarmSimulator:
                 self.state.nodes[node_id].current_shot_id = s_id
                 self.state.nodes[node_id].current_frame = 1000 + comp_f + 1
 
-        self.update_cycle_deadlines(now)
+        self.state.active_scenario = ScenarioType.BASELINE
+
+        # Burn-down sync for current time within cycle
+        t_elapsed = (now - cycle_start).total_seconds()
+        if "sh_118" in self.state.shots:
+            sh = self.state.shots["sh_118"]
+            rate = sh.estimated_seconds_per_frame
+            elapsed_frames = int(t_elapsed / max(1.0, rate))
+            sh.completed_frames = min(sh.total_frames - 20, 240 + elapsed_frames)
+
+    def update_cycle_deadlines(self, now: Optional[datetime] = None) -> None:
+        """
+        Synchronizes show deadlines and in-flight progress with the current 6-hour cycle epoch.
+        If a new cycle epoch has begun, resets the farm state cleanly.
+        """
+        now = now or datetime.now(timezone.utc)
+        self.state.last_updated = now
+        epoch_seconds = int(now.timestamp())
+        cycle_length_sec = 6 * 3600  # 6 hours
+        current_epoch = int(epoch_seconds // cycle_length_sec)
+
+        # If we crossed into a new 6-hour cycle epoch, execute full clean reset
+        if self._current_cycle_epoch is None or self._current_cycle_epoch != current_epoch:
+            self.reset_cycle(now)
+            return
+
+        cycle_start_ts = epoch_seconds - (epoch_seconds % cycle_length_sec)
+        cycle_start = datetime.fromtimestamp(cycle_start_ts, tz=timezone.utc)
+        t_elapsed = (now - cycle_start).total_seconds()
+
+        # Synchronize in-flight shot completion with elapsed cycle time
+        if "sh_118" in self.state.shots:
+            sh = self.state.shots["sh_118"]
+            rate = sh.estimated_seconds_per_frame
+            elapsed_frames = int(t_elapsed / max(1.0, rate))
+            sh.completed_frames = min(sh.total_frames - 20, 240 + elapsed_frames)
 
     def inject_scenario(self, scenario: ScenarioType, target_temp: Optional[float] = None) -> None:
         """Injects a specific degradation scenario or restores baseline."""
