@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "callsheet"
+version = "0.1.0"
+description = "Autonomous render pipeline agent for post-production delivery producers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Robert Moore", email = "iamrobertmoore@users.noreply.github.com"}
+]
+dependencies = [
+    "google-adk>=2.7.0",
+    "google-genai>=2.20.0",
+    "google-cloud-aiplatform>=1.60.0",
+    "google-auth>=2.47.0",
+    "google-cloud-firestore>=2.16.0",
+    "mcp>=1.29.0,<2.0.0",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "httpx>=0.27.0",
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp>=1.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["callsheet*"]
