@@ -184,6 +184,7 @@ class RenderFarmSimulator:
                 if n.is_standby:
                     n.status = NodeStatus.STANDBY
                     n.temperature_celsius = 42.0
+                    n.current_shot_id = None
             
             # Shot 118 re-allocated to node-07 and render time jumps from 20s to 120s
             shot = self.state.shots.get("sh_118")
@@ -201,18 +202,7 @@ class RenderFarmSimulator:
                 shot.status = ShotStatus.AT_RISK
 
         elif scenario == ScenarioType.BASELINE:
-            for node_id, node in self.state.nodes.items():
-                if node.is_standby:
-                    node.status = NodeStatus.STANDBY
-                    node.temperature_celsius = 42.0
-                else:
-                    node.status = NodeStatus.HEALTHY
-                    node.temperature_celsius = round(random.uniform(58.0, 66.0), 1)
-            
-            for shot in self.state.shots.values():
-                shot.current_seconds_per_frame = shot.estimated_seconds_per_frame
-                if shot.status == ShotStatus.AT_RISK:
-                    shot.status = ShotStatus.RENDERING
+            self.reset_cycle()
 
     def reallocate_shot(
         self,
