@@ -27,7 +27,7 @@ Callsheet monitors render operations through Grafana Cloud over the Model Contex
           │
           │ (Model Context Protocol)
           ▼
- [ Callsheet Operations Agent (Python + Vertex AI Gemini) ]
+ [ Callsheet Operations Agent (Google ADK + Vertex AI Gemini 3.6 Flash) ]
           │
           ├─► Step 1: Anomaly Detection (Prometheus)                 [DETERMINISTIC TELEMETRY]
           ├─► Step 2: Correlation (Loki Logs & Tempo Traces)         [DETERMINISTIC TELEMETRY]
@@ -38,13 +38,17 @@ Callsheet monitors render operations through Grafana Cloud over the Model Contex
           └─► Step 7: Producer Callsheet Briefing (Gemini 3.6 Flash) [GENERATIVE AI]
 ```
 
+## Architecture and Native Google ADK Integration
+
+Callsheet is built natively on the Google Agent Development Kit (ADK). It uses `google.adk.tools.mcp_tool.McpToolset` with `StreamableHTTPConnectionParams` to manage Model Context Protocol tool lifecycle, streaming HTTP connections, and dynamic schema binding directly to the Grafana Cloud MCP server.
+
 ## Deterministic Action vs. Generative Explanation
 
 A non-negotiable architectural principle in Callsheet is the boundary between deterministic operational decisions and generative language synthesis:
 
 - Generative models cannot trigger, alter, or approve any operational intervention.
 - Interventions are 100% deterministic: Thermal limits (Step 1) and delivery buffer calculations (Step 4) are evaluated purely with mathematical arithmetic in Python. The workload failover (Step 5) is executed only when code assertions confirm a negative buffer margin and a thermal limit breach.
-- Verification closes the loop: Unlike competing tools that merely propose recommendations or assume success upon executing a command, Step 6 re-queries Grafana Cloud telemetry on the standby blade to independently verify nominal frame durations (20 seconds per frame) and stable junction temperatures. If metrics remain degraded, Callsheet rejects the `PROTECTED` status, records the verified fault, and escalates directly to human technical directors.
+- Verification closes the loop: Acting without asking is the harder engineering problem because taking action obliges the agent to prove the action worked. In Step 6, Callsheet re-queries Grafana Cloud telemetry on the standby blade to independently verify nominal frame durations (20 seconds per frame) and stable junction temperatures. If metrics remain degraded, Callsheet disallows the `PROTECTED` status, records the verified fault, and escalates within the producer briefing with diagnostics for technical directors.
 - Generative AI is strictly explanatory: Vertex AI Gemini 3.6 Flash is employed exclusively for qualitative synthesis: Step 3 (deducing root causes from correlated logs and traces) and Step 7 (drafting plain-language correspondence briefings for delivery producers).
 
 ## Decision Path Integrity and the Rip-Out Test
@@ -53,7 +57,7 @@ Callsheet enforces strict telemetry boundary isolation across its entire decisio
 
 - No number reaches a decision without a round trip through Grafana Cloud: The Callsheet agent never reads the simulator's internal memory or local state. Every metric sample, log record, and trace duration that drives an intervention decision is retrieved dynamically from Grafana Cloud over the Model Context Protocol.
 - The Rip-Out Test: The proof of this isolation is that pointing Callsheet at an unreachable or severed Grafana endpoint causes the mission to fail immediately. The agent contains no mock fallbacks, local memory shortcuts, or side-channel cheats. This failure invariant is asserted in the automated test suite: `tests/test_agent_mission.py::test_mission_fails_when_grafana_unreachable`.
-- What the Farm Is: The render farm is an operational simulator that emits genuine OpenTelemetry metrics (Prometheus), structured logs (Loki), and distributed trace spans (Tempo) to Grafana Cloud via an OTLP gateway. The agent queries that telemetry back through MCP exactly as it would against physical on-premise blade servers, AWS Deadline nodes, or Pixar Tractor workers.
+- What the Farm Is: The render farm is an operational simulator that emits genuine OpenTelemetry metrics (Prometheus), structured logs (Loki), and distributed trace spans (Tempo) to Grafana Cloud via an OTLP gateway. The agent queries that telemetry back through MCP exactly as it would against physical on-premise blade servers, cloud instances, or commercial render farm managers.
 - Transition to Physical Infrastructure: To connect Callsheet to physical studio hardware, only the telemetry emitter changes. The agent reasoning loop, MCP tool bindings, deterministic gates, and briefing pipelines remain identical.
 - Stated Baseline Render Rate: The baseline render rate (20.0 seconds per frame) is an explicit stated parameter of the simulator representing nominal throughput, rather than a wall-clock measurement subject to vCPU jitter. Downstream contractual buffer arithmetic is derived deterministically from this stated baseline.
 
@@ -101,6 +105,14 @@ pytest tests/test_agent_mission.py::test_mission_fails_when_grafana_unreachable 
 ./scripts/start_server.sh
 ```
 Open `http://localhost:8080` in your browser to view the active Call Sheet dashboard, or visit `/demo` to inject scenarios on demand.
+
+## Technologies Used
+
+- **Google Agent Development Kit (ADK)**: Built natively on the ADK using `google.adk.tools.mcp_tool.McpToolset` and `StreamableHTTPConnectionParams` to manage Model Context Protocol tool lifecycle and streaming HTTP connections to Grafana Cloud.
+- **Vertex AI Gemini**: Gemini 3.6 Flash (`google-genai`) accessed via the Vertex AI global endpoint for log synthesis and correspondence generation.
+- **Grafana Stack**: Grafana Cloud, `grafana/mcp-grafana` MCP Server, Prometheus metrics, Loki logs, and OpenTelemetry ingestion (Tempo traces).
+- **Google Cloud Platform**: Cloud Run (instance-based billing with dedicated CPU allocation) and Cloud Build.
+- **Python Runtime**: Python 3.12, FastAPI, asyncio background workers, and OpenTelemetry instrumentation SDKs.
 
 ## License
 
