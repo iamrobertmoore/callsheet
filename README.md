@@ -1,6 +1,6 @@
 # Callsheet
 
-Elena Vance represents the delivery producer persona I designed Callsheet around: she works at an independent visual effects house like Cinefex Northern Pictures in Manchester. Her team finishes shots for episodic streaming television. Right now, Elena is responsible for delivering Chronicles of Aethelgard: Episode 6, facing a contractual delivery deadline later that afternoon. If her delivery slips past the contractual deadline, Cinefex incurs an immediate financial penalty of £25,000 per day.
+Elena Vance is the delivery producer at Cinefex Northern Pictures, an independent visual effects house in Manchester. Her team finishes shots for episodic streaming television. Right now, Elena is responsible for delivering Chronicles of Aethelgard: Episode 6, facing a contractual delivery deadline later that afternoon. If her delivery slips past the contractual deadline, Cinefex incurs an immediate financial penalty of £25,000 per day. Elena is the user persona I designed Callsheet around rather than a real customer.
 
 When a render blade degrades in the middle of the night, standard monitoring alerts an infrastructure engineer with hardware temperatures and fan speeds. That engineer is rarely equipped to evaluate shot dependencies, delivery buffers, or contractual SLA penalties. I built Callsheet for Elena and the studio crews who answer for delivery commitments.
 
@@ -57,7 +57,7 @@ Callsheet enforces strict telemetry boundary isolation across its entire decisio
 
 - No number reaches a decision without a round trip through Grafana Cloud: The Callsheet agent never reads the simulator's internal memory or local state. Every metric sample, log record, and trace duration that drives an intervention decision is retrieved dynamically from Grafana Cloud over the Model Context Protocol.
 - The Rip-Out Test: The proof of this isolation is that pointing Callsheet at an unreachable or severed Grafana endpoint causes the mission to fail immediately. The agent contains no mock fallbacks, local memory shortcuts, or side-channel cheats. This failure invariant is asserted in the automated test suite: `tests/test_agent_mission.py::test_mission_fails_when_grafana_unreachable`.
-- What the Farm Is: The render farm is an operational simulator that emits genuine OpenTelemetry metrics (Prometheus), structured logs (Loki), and distributed trace spans (Tempo) to Grafana Cloud via an OTLP gateway. The agent queries that telemetry back through MCP exactly as it would against physical on-premise blade servers, cloud instances, or commercial render farm managers.
+- What the Farm Is: There is no actual render farm behind this; the machines are simulated. But the metrics, logs, and trace spans they emit are genuine OpenTelemetry sent to a real Grafana Cloud stack via an OTLP gateway, and the agent reads them back the same way it would read real hardware. Callsheet queries that telemetry through MCP exactly as it would against physical on-premise blade servers, cloud instances, or commercial render farm managers.
 - Transition to Physical Infrastructure: To connect Callsheet to physical studio hardware, only the telemetry emitter changes. The agent reasoning loop, MCP tool bindings, deterministic gates, and briefing pipelines remain identical.
 - Stated Baseline Render Rate: The baseline render rate (20.0 seconds per frame) is an explicit stated parameter of the simulator representing nominal throughput, rather than a wall-clock measurement subject to vCPU jitter. Downstream contractual buffer arithmetic is derived deterministically from this stated baseline.
 
@@ -109,9 +109,9 @@ Open `http://localhost:8080` in your browser to view the active Call Sheet dashb
 ## Technologies Used
 
 - **Google Agent Development Kit (ADK)**: Built natively on the ADK using `google.adk.tools.mcp_tool.McpToolset` and `StreamableHTTPConnectionParams` to manage Model Context Protocol tool lifecycle and streaming HTTP connections to Grafana Cloud.
-- **Vertex AI Gemini**: Gemini 3.6 Flash (`google-genai`) accessed via the Vertex AI global endpoint for log synthesis and correspondence generation.
+- **Vertex AI Gemini**: Gemini 3.6 Flash (`google-genai`) accessed via the global endpoint (`location="global"`), avoiding regional endpoint 404 errors observed during development.
 - **Grafana Stack**: Grafana Cloud, `grafana/mcp-grafana` MCP Server, Prometheus metrics, Loki logs, and OpenTelemetry ingestion (Tempo traces).
-- **Google Cloud Platform**: Cloud Run (instance-based billing with dedicated CPU allocation) and Cloud Build.
+- **Google Cloud Platform**: Cloud Run deployed with instance-based billing and dedicated CPU allocation (addressing request-based billing constraints where "CPU is only allocated during request processing" and idle instances can shut down at any time) and Cloud Build.
 - **Python Runtime**: Python 3.12, FastAPI, asyncio background workers, and OpenTelemetry instrumentation SDKs.
 
 ## License
