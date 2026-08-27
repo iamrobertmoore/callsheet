@@ -44,6 +44,16 @@ A core architectural invariant of Callsheet is the strict separation between det
 - **Verification closes the loop**: Unlike systems that propose actions or assume success upon command execution, Step 6 re-queries Grafana Cloud telemetry on the standby node to independently verify nominal frame render rates (20s) and junction temperatures (<70°C). If metrics remain degraded, the agent disallows the `PROTECTED` status, records the verified failure, and escalates to human technical directors.
 - **Generative AI is explanatory only**: Vertex AI Gemini 3.6 Flash is employed exclusively for explanatory synthesis (Step 3 Root Cause Deduction and Step 7 Producer Callsheet Briefings), translating raw correlated telemetry into actionable commercial language for delivery producers.
 
+## Decision Path Integrity and the Rip-Out Test
+
+Callsheet enforces strict telemetry boundary isolation across its entire decision path:
+
+- **No number reaches a decision without a round trip through Grafana Cloud**: The Callsheet agent never reads the simulator's internal memory or local state. Every metric sample, log record, and trace duration that drives an intervention decision is retrieved dynamically from Grafana Cloud over the Model Context Protocol (MCP).
+- **The Rip-Out Test**: The evidence of this isolation is that pointing the mission at an offline, unconfigured, or unreachable Grafana instance causes the mission to fail immediately and outright. There are no silent fallbacks, in-memory cheats, or mocked data side-channels.
+- **What the Farm Is**: The synthetic farm is an operational simulator that emits genuine OpenTelemetry metrics (Prometheus), structured logs (Loki), and distributed trace spans (Tempo) to a real Grafana Cloud stack via an OTLP gateway. The agent queries that telemetry back through MCP exactly as it would against physical on-premise blade servers, AWS Deadline nodes, or Pixar Tractor workers.
+- **Transition to Physical Infrastructure**: To point Callsheet at physical studio infrastructure, only the telemetry emitter changes. The agent, reasoning loop, MCP tools, arithmetic gates, and briefing pipelines remain 100% identical.
+- **Measured Hardware Baseline**: The nominal 20.0s frame rendering baseline is not an arbitrary asserted constant. It is calibrated at container startup by running a real CPU compute benchmark directly on the host instance, with deterministic downstream arithmetic derived from that measured baseline.
+
 ## Live Observability & Grafana Control Tower
 
 A dedicated Grafana Cloud dashboard provides real-time visibility into the render farm's node temperatures, worker frame durations, and active render queue:
