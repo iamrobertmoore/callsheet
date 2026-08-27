@@ -178,10 +178,17 @@ class RenderFarmSimulator:
             node.status = NodeStatus.THROTTLED
             node.temperature_celsius = round(target_temp, 1) if target_temp is not None else 95.9  # Exceeds 90C limit
             node.cpu_utilization = 99.0
+
+            # Re-arm standby nodes to ensure spare capacity is available for scenario demo
+            for n_id, n in self.state.nodes.items():
+                if n.is_standby:
+                    n.status = NodeStatus.STANDBY
+                    n.temperature_celsius = 42.0
             
-            # Shot 118 frame render time jumps from 20s to 120s due to hardware down-throttling
+            # Shot 118 re-allocated to node-07 and render time jumps from 20s to 120s
             shot = self.state.shots.get("sh_118")
             if shot:
+                shot.allocated_node_id = "node-07"
                 shot.current_seconds_per_frame = 120.0
                 shot.status = ShotStatus.AT_RISK
 

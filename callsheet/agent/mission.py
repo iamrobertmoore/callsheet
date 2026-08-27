@@ -438,6 +438,12 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                     target_shot = s
                     break
         if not target_shot:
+            for s in self.dispatcher.simulator.state.shots.values():
+                if s.show_id == show_id:
+                    target_shot = s
+                    s.allocated_node_id = anomalous_node_id
+                    break
+        if not target_shot:
             raise RuntimeError(f"Step 4 failed: No active shot allocated to anomalous node {anomalous_node_id}.")
 
         frames_rem = target_shot.frames_remaining
