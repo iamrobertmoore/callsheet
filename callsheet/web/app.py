@@ -66,6 +66,7 @@ class ScenarioRequest(BaseModel):
 
 class MissionRequest(BaseModel):
     show_id: Optional[str] = "show-aethelgard"
+    force_verification_fault: Optional[bool] = False
 
 
 @app.get("/api/health")
@@ -82,7 +83,7 @@ async def health_check():
 async def get_farm_state():
     """Returns the current state of shows, nodes, active shots, and latest mission."""
     state = simulator.state
-    return {
+    content = {
         "active_scenario": state.active_scenario.value,
         "last_updated": state.last_updated.isoformat(),
         "shows": {k: v.model_dump(mode="json") for k, v in state.shows.items()},
@@ -92,6 +93,14 @@ async def get_farm_state():
         "is_investigating": worker.is_investigating,
         "interventions_count": len(dispatcher.history),
     }
+    return JSONResponse(
+        content=content,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.post("/api/scenario")
@@ -112,11 +121,21 @@ async def inject_scenario(req: ScenarioRequest):
 
 @app.post("/api/mission")
 async def run_mission(req: MissionRequest):
-    """Executes the 6-step observability to intervention mission."""
+    """Executes the 7-step observability, intervention, and post-verification mission."""
     try:
-        result = await mission_runner.execute_mission(show_id=req.show_id or "show-aethelgard")
+        result = await mission_runner.execute_mission(
+            show_id=req.show_id or "show-aethelgard",
+            force_verification_fault=bool(req.force_verification_fault),
+        )
         worker.latest_mission = result.model_dump(mode="json")
-        return worker.latest_mission
+        return JSONResponse(
+            content=worker.latest_mission,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
 
@@ -277,16 +296,28 @@ def render_ssr_trail(steps: list) -> str:
         return '<div style="font-size: 12px; color: var(--text-muted);">No steps recorded.</div>'
     import json
     entries = []
+    badges = {
+        "DETERMINISTIC_TELEMETRY": '<span class="badge-type badge-telemetry">DETERMINISTIC TELEMETRY</span>',
+        "DETERMINISTIC_ARITHMETIC": '<span class="badge-type badge-arithmetic">DETERMINISTIC ARITHMETIC</span>',
+        "DETERMINISTIC_ACTION": '<span class="badge-type badge-action">DETERMINISTIC ACTION</span>',
+        "DETERMINISTIC_VERIFICATION": '<span class="badge-type badge-verification">DETERMINISTIC VERIFICATION</span>',
+        "GENERATIVE_SYNTHESIS": '<span class="badge-type badge-generative">GENERATIVE AI (EXPLANATORY)</span>',
+    }
     for step in steps:
         step_num = step.get("step_number") if isinstance(step, dict) else getattr(step, "step_number", 1)
         name = step.get("name") if isinstance(step, dict) else getattr(step, "name", "")
         desc = step.get("description") if isinstance(step, dict) else getattr(step, "description", "")
+        exec_type = step.get("execution_type") if isinstance(step, dict) else getattr(step, "execution_type", "DETERMINISTIC_TELEMETRY")
         evidence = step.get("evidence") if isinstance(step, dict) else getattr(step, "evidence", {})
         evidence_str = json.dumps(evidence, indent=2) if evidence else ""
+        badge_html = badges.get(exec_type, '<span class="badge-type badge-telemetry">DETERMINISTIC</span>')
 
         entries.append(f"""
             <div class="step-entry">
-                <div class="step-title">Step {step_num}: {name}</div>
+                <div class="step-title">
+                    <span>Step {step_num}: {name}</span>
+                    {badge_html}
+                </div>
                 <div class="step-desc">{desc}</div>
                 {f'<pre class="step-evidence">{evidence_str}</pre>' if evidence_str and evidence_str != '{}' else ''}
             </div>
@@ -687,6 +718,74 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             font-size: 12px;
             font-weight: 600;
             color: var(--text-heading);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .badge-type {
+            font-family: var(--font-mono);
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 3px;
+            white-space: nowrap;
+        }
+
+        .badge-telemetry {
+            color: #38bdf8;
+            background: rgba(56, 189, 248, 0.12);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+        }
+
+        .badge-arithmetic {
+            color: #34d399;
+            background: rgba(52, 211, 153, 0.12);
+            border: 1px solid rgba(52, 211, 153, 0.3);
+        }
+
+        .badge-action {
+            color: #c084fc;
+            background: rgba(192, 132, 252, 0.12);
+            border: 1px solid rgba(192, 132, 252, 0.3);
+        }
+
+        .badge-verification {
+            color: #2dd4bf;
+            background: rgba(45, 212, 191, 0.12);
+            border: 1px solid rgba(45, 212, 191, 0.3);
+        }
+
+        .badge-generative {
+            color: #fbbf24;
+            background: rgba(251, 191, 36, 0.12);
+            border: 1px solid rgba(251, 191, 36, 0.3);
+        }
+
+        .btn-grafana {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            color: #f97316;
+            background: rgba(249, 115, 22, 0.1);
+            border: 1px solid rgba(249, 115, 22, 0.35);
+            border-radius: 4px;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn-grafana:hover {
+            background: rgba(249, 115, 22, 0.2);
+            border-color: #f97316;
+            text-decoration: none;
         }
 
         .step-desc {
@@ -775,6 +874,10 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 <p>Autonomous Operations Agent for Post-Production Delivery Producers</p>
             </div>
             <div class="header-meta">
+                <a href="https://bigforest2172.grafana.net/d/callsheet-control-tower/callsheet-media-production-control-tower" target="_blank" rel="noopener noreferrer" class="btn-grafana">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                    Grafana Control Tower
+                </a>
                 <div id="utc-clock" class="utc-clock">--:--:-- UTC</div>
                 <div id="agent-status-badge" class="status-badge badge-live">
                     <span class="badge-pulse"></span>
@@ -1009,9 +1112,29 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     evidenceStr = JSON.stringify(step.evidence, null, 2);
                 }
 
+                const execType = step.execution_type || 'DETERMINISTIC_TELEMETRY';
+                let badgeClass = 'badge-telemetry';
+                let badgeLabel = 'DETERMINISTIC TELEMETRY';
+                if (execType === 'DETERMINISTIC_ARITHMETIC') {
+                    badgeClass = 'badge-arithmetic';
+                    badgeLabel = 'DETERMINISTIC ARITHMETIC';
+                } else if (execType === 'DETERMINISTIC_ACTION') {
+                    badgeClass = 'badge-action';
+                    badgeLabel = 'DETERMINISTIC ACTION';
+                } else if (execType === 'DETERMINISTIC_VERIFICATION') {
+                    badgeClass = 'badge-verification';
+                    badgeLabel = 'DETERMINISTIC VERIFICATION';
+                } else if (execType === 'GENERATIVE_SYNTHESIS') {
+                    badgeClass = 'badge-generative';
+                    badgeLabel = 'GENERATIVE AI (EXPLANATORY)';
+                }
+
                 return `
                     <div class="step-entry">
-                        <div class="step-title">Step ${step.step_number}: ${step.name}</div>
+                        <div class="step-title">
+                            <span>Step ${step.step_number}: ${step.name}</span>
+                            <span class="badge-type ${badgeClass}">${badgeLabel}</span>
+                        </div>
                         <div class="step-desc">${step.description}</div>
                         ${evidenceStr && evidenceStr !== '{}' ? `<div class="step-evidence">${evidenceStr}</div>` : ''}
                     </div>
@@ -1206,7 +1329,8 @@ DEMO_UI_HTML = """<!DOCTYPE html>
                 <button class="btn-danger" onclick="injectScenario('THERMAL_THROTTLING')">Inject Scenario: Node-07 Thermal Throttling</button>
                 <button class="btn-secondary" onclick="injectScenario('MEMORY_LEAK_OOM')">Inject Scenario: Memory Leak (OOM)</button>
                 <button class="btn-secondary" onclick="injectScenario('BASELINE')">Restore Baseline Operations</button>
-                <button class="btn-primary" onclick="runManualMission()">Trigger Manual Agent Mission</button>
+                <button class="btn-primary" onclick="runManualMission()">Trigger Verified Mission</button>
+                <button class="btn-danger" style="background: #7f1d1d; color: #fca5a5; border-color: #ef4444;" onclick="runFailureMission()">Force Verification Failure (Failover Stall)</button>
             </div>
         </div>
 
@@ -1219,7 +1343,7 @@ DEMO_UI_HTML = """<!DOCTYPE html>
     <script>
         function log(msg) {
             const box = document.getElementById('log-box');
-            const time = new Date().toLocaleTimeString();
+            const time = new Date().toISOString().substring(11, 19) + ' UTC';
             box.innerHTML = `[${time}] ${msg}<br>` + box.innerHTML;
         }
 
@@ -1239,15 +1363,30 @@ DEMO_UI_HTML = """<!DOCTYPE html>
         }
 
         async function runManualMission() {
-            log('Triggering manual 6-step mission across Prometheus, Loki, Tempo, and Vertex AI...');
+            log('Triggering manual 7-step mission across Prometheus, Loki, Tempo, Vertex AI, and Closed-Loop Verification...');
             try {
                 const res = await fetch('/api/mission', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ show_id: 'show-aethelgard' })
+                    body: JSON.stringify({ show_id: 'show-aethelgard', force_verification_fault: false })
                 });
                 const data = await res.json();
-                log(`Mission complete: ${data.anomaly_detected} -> Intervention: ${data.intervention_record ? data.intervention_record.status : 'None'}`);
+                log(`Mission complete: ${data.anomaly_detected} -> Verification: ${data.verification_status} (Buffer: ${data.intervention_record ? data.intervention_record.status : 'None'})`);
+            } catch (err) {
+                log(`Mission error: ${err}`);
+            }
+        }
+
+        async function runFailureMission() {
+            log('Triggering 7-step mission with FORCED post-intervention verification failure...');
+            try {
+                const res = await fetch('/api/mission', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ show_id: 'show-aethelgard', force_verification_fault: true })
+                });
+                const data = await res.json();
+                log(`Mission completed with ESCALATION: Verification: ${data.verification_status}. Briefing generated with immediate human TD escalation recommendation.`);
             } catch (err) {
                 log(`Mission error: ${err}`);
             }
@@ -1299,9 +1438,23 @@ async def get_producer_dashboard():
         .replace("<!-- SSR_FLEET_SUMMARY -->", fleet_summary)
         .replace("<!-- SSR_FLEET -->", fleet_html)
     )
-    return HTMLResponse(content=html)
+    return HTMLResponse(
+        content=html,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/demo", response_class=HTMLResponse)
 async def get_demo_harness():
-    return DEMO_UI_HTML
+    return HTMLResponse(
+        content=DEMO_UI_HTML,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )

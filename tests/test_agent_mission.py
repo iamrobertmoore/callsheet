@@ -102,17 +102,118 @@ async def test_full_six_step_mission_against_live_grafana():
         # Verify mission structure and genuine data extraction
         assert result.show_id == "show-aethelgard"
         assert result.anomalous_node_id == "node-07"
-        assert len(result.steps) == 6
+        assert len(result.steps) == 7
         assert result.intervention_record is not None
         assert result.intervention_record.previous_node_id == "node-07"
         assert result.intervention_record.target_node_id.startswith("node-")
         assert result.intervention_record.status == "PROTECTED"
+        assert result.verification_status == "VERIFIED_PROTECTED"
+
+        # Verify Step 6 (Post-Intervention Telemetry Verification)
+        assert result.steps[5].name == "Post-Intervention Telemetry Verification (Grafana Cloud)"
+        assert result.steps[5].execution_type == "DETERMINISTIC_VERIFICATION"
+        assert result.steps[5].evidence["verification_passed"] is True
+        assert result.steps[5].evidence["target_node"].startswith("node-")
+
+        # Verify Step 7 (Producer Callsheet Briefing)
+        assert result.steps[6].name == "Producer Callsheet Briefing"
         assert len(result.callsheet_briefing) > 50
 
         # Assert no em dashes in briefing
         assert "—" not in result.callsheet_briefing, "Briefing must not contain em dashes"
 
-        print("\n=== LIVE GENERATED CALLSHEET BRIEFING ===")
+        print("\n=== LIVE GENERATED CALLSHEET BRIEFING (7-STEP VERIFIED) ===")
+        print(result.callsheet_briefing)
+
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+
+
+@pytest.mark.asyncio
+async def test_post_intervention_verification_escalation_path():
+    """
+    Verifies the testable failure path:
+    When the failover standby node fails post-intervention telemetry verification,
+    the mission must NOT claim success. It must set status ESCALATED, record the
+    failure evidence, and provide explicit human TD escalation recommendations.
+    """
+    sim = RenderFarmSimulator()
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    emitter = FarmTelemetryEmitter(sim)
+
+    # Emit telemetry into Grafana Cloud
+    sim.tick(delta_seconds=30.0)
+    emitter.emit_metrics_tick()
+    node7_temp = sim.state.nodes["node-07"].temperature_celsius
+    emitter.emit_log(
+        f"CRITICAL: Thermal junction temperature on node-07 reached {node7_temp:.1f}C (threshold: 90.0C). Hardware clock down-throttled to 800MHz.",
+        level="WARN",
+        node_id="node-07",
+        shot_code="118",
+        show_id="show-aethelgard",
+        frame_number=1025,
+    )
+    emitter.emit_frame_trace(
+        node_id="node-07",
+        shot_code="118",
+        show_name="Chronicles of Aethelgard: Episode 6",
+        frame_number=1025,
+        duration_seconds=120.0,
+        is_throttled=True,
+    )
+    emitter.metric_reader.force_flush()
+    emitter.logger_provider.force_flush()
+    emitter.tracer_provider.force_flush()
+
+    time.sleep(4)
+
+    dispatcher = InterventionDispatcher(sim)
+
+    mcp_bin = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin", "mcp-grafana"))
+    if not os.path.exists(mcp_bin):
+        pytest.skip(f"mcp-grafana binary not found at {mcp_bin}")
+
+    port = 8140
+    server_url = f"http://127.0.0.1:{port}/mcp"
+    env = os.environ.copy()
+
+    cmd = [
+        mcp_bin,
+        "-t", "streamable-http",
+        "-address", f"127.0.0.1:{port}",
+        "-endpoint-path", "/mcp",
+        "-log-level", "info",
+    ]
+
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    try:
+        time.sleep(2)
+        assert proc.poll() is None, "mcp-grafana failed to start"
+
+        runner = MultiStepMissionRunner(
+            dispatcher=dispatcher,
+            mcp_server_url=server_url,
+            project_id="agent-attest-2026",
+            location="global",
+            model_name="gemini-3.6-flash",
+        )
+
+        # Force verification fault
+        result = await runner.execute_mission(show_id="show-aethelgard", force_verification_fault=True)
+
+        assert len(result.steps) == 7
+        assert result.verification_status == "ESCALATED"
+        assert result.intervention_record.status == "ESCALATED"
+        assert result.steps[5].evidence["verification_passed"] is False
+        assert "HUMAN" in result.steps[5].evidence["human_recommendation"].upper()
+        assert "—" not in result.callsheet_briefing
+
+        print("\n=== ESCALATED BRIEFING (VERIFICATION FAILURE) ===")
         print(result.callsheet_briefing)
 
     finally:

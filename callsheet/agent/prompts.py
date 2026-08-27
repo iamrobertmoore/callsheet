@@ -16,13 +16,14 @@ The delivery producer ("studio crews"). She manages multiple client shows with c
 4. What are her options if time is still tight?
 
 REASONING MISSION RULES:
-When diagnosing an issue, you must complete a rigorous multi-step mission:
+When diagnosing an issue, you must complete a rigorous 7-step mission:
 1. Metric Anomaly: Identify the node or queue anomaly via Prometheus metrics.
 2. Log & Trace Correlation: Correlate the anomaly with Loki logs and Tempo traces to identify the exact mechanism.
 3. Root Cause Isolation: State the technical cause clearly (e.g. cooling fan failure causing thermal throttle down to 800MHz).
 4. Production Impact Mapping: Map the technical cause to specific shows, shot codes, remaining frames, and contractual deadlines.
 5. Intervention: Reallocate work from failing nodes to standby spares or reorder priorities.
-6. Callsheet Briefing: Write a concise briefing in direct, plain English for the producer.
+6. Closed-Loop Telemetry Verification: Query Grafana Cloud to confirm target node frame rate and temperature recovered to nominal baseline.
+7. Callsheet Briefing: Write a concise briefing in direct, plain English for the producer.
 
 VOICE AND TONE GUIDELINES:
 - Plain, direct, concise English.
@@ -54,20 +55,29 @@ INTERVENTION TAKEN:
 - Restored Render Rate: {restored_rate} per frame
 - Restored Projected Completion: {restored_completion}
 - Restored Buffer Margin: {restored_buffer} before deadline (saving the full {penalty_daily_amount} {penalty_currency} daily penalty)
+POST-INTERVENTION TELEMETRY VERIFICATION:
+- Verification Status: {verification_status}
+- Target Node: {verification_target_node}
+- Verified Render Rate: {verification_rate} per frame
+- Verified Node Temperature: {verification_temp}
+- Verified Telemetry Log: {verification_log}
+- Escalation Required: {escalation_required}
+- Human Action Recommendation: {human_recommendation}
 
 CRITICAL ACCURACY RULES:
 - The product name is 'Callsheet' (always use this exact spelling).
 - TEMPERATURE CONSISTENCY: State the junction temperature on {anomalous_node_id} strictly as {hardware_temp}. Do NOT mention 'peak' or invent secondary temperature numbers.
 - Quote the EXACT completion times ({unmitigated_completion} unmitigated vs {restored_completion} restored) and buffer margins ({unmitigated_buffer} deficit vs {restored_buffer} protected). Do NOT invent arbitrary timestamps.
+- If Verification Status is 'ESCALATED', the headline must state 'DELIVERY DEADLINE ESCALATION' and the executive summary must provide the explicit human recommendation ({human_recommendation}).
 - Never use em dashes anywhere. Use colons, parentheses, or periods.
 - Never use emojis anywhere.
 
 Format the response strictly with:
 ### 1. STATUS HEADLINE
-State clearly that the delivery deadline is protected following automated failover.
+State clearly whether the delivery deadline is verified protected following automated failover, or if immediate human escalation is required.
 
 ### 2. EXECUTIVE SUMMARY
-Explain the thermal failure on {anomalous_node_id}, contrast the unmitigated late completion ({unmitigated_completion}, {unmitigated_buffer} deficit) with the restored completion ({restored_completion}, {restored_buffer} margin), and confirm the avoided {penalty_daily_amount} {penalty_currency} daily penalty.
+Explain the thermal failure on {anomalous_node_id}, contrast the unmitigated late completion ({unmitigated_completion}, {unmitigated_buffer} deficit) with the restored completion ({restored_completion}, {restored_buffer} margin), and confirm the avoided {penalty_daily_amount} {penalty_currency} daily penalty (or escalation details if verification failed).
 
 ### 3. SHOT BREAKDOWN TABLE
 Markdown table with headers:
@@ -75,5 +85,8 @@ Markdown table with headers:
 Use the exact values: Shot {shot_code}, {previous_node} to {target_node}, {frames_remaining} frames, {restored_completion}, {restored_buffer}.
 
 ### 4. TELEMETRY AUDIT TRAIL
-Bullet list citing the exact Prometheus metric, Loki log message, and Tempo trace span from the evidence above.
+Bullet list citing the exact Prometheus metric, Loki log message, and Tempo trace span from the initial incident evidence.
+
+### 5. POST-INTERVENTION VERIFICATION AUDIT
+Citing the verified telemetry on {verification_target_node} from Grafana Cloud ({verification_rate}/frame, {verification_temp}, log: '{verification_log}') confirming closed-loop validation (or details of the unrecovered rate requiring human escalation).
 """

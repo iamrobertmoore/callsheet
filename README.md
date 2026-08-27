@@ -24,21 +24,37 @@ This project serves one person: the delivery producer at a post-production house
           │
           │ (Model Context Protocol)
           ▼
- [ Google ADK Agent (Vertex AI Gemini) ]
+ [ Callsheet Operations Agent (ADK + Vertex AI Gemini) ]
           │
-          ├─► 1. Anomaly Detection (Prometheus)
-          ├─► 2. Correlation (Loki Logs & Tempo Traces)
-          ├─► 3. Root Cause Isolation
-          ├─► 4. Shot Delivery Risk Projection
-          ├─► 5. Automated Job Reallocation
-          └─► 6. Producer Callsheet Briefing
+          ├─► 1. Anomaly Detection (Prometheus)                   [DETERMINISTIC TELEMETRY]
+          ├─► 2. Correlation (Loki Logs & Tempo Traces)           [DETERMINISTIC TELEMETRY]
+          ├─► 3. Root Cause Isolation (Gemini 3.6 Flash)          [GENERATIVE AI]
+          ├─► 4. Production Impact Mapping                        [DETERMINISTIC ARITHMETIC]
+          ├─► 5. Automated Job Reallocation                       [DETERMINISTIC ACTION]
+          ├─► 6. Post-Intervention Verification (Grafana Cloud)   [DETERMINISTIC VERIFICATION]
+          └─► 7. Producer Callsheet Briefing (Gemini 3.6 Flash)   [GENERATIVE AI]
 ```
+
+## Deterministic Remediation vs. Generative Explanation
+
+A core architectural invariant of Callsheet is the strict separation between deterministic remediation and generative language explanation:
+
+- **Gemini cannot trigger, alter, or override any operational verdict.**
+- **Remediation is purely deterministic**: Hardware threshold breaches (Step 1) and delivery buffer deficits (Step 4) are evaluated strictly with pure mathematical arithmetic. The workload failover intervention (Step 5) is executed only when code assertions confirm a negative buffer margin and hardware thermal breach.
+- **Verification closes the loop**: Unlike systems that propose actions or assume success upon command execution, Step 6 re-queries Grafana Cloud telemetry on the standby node to independently verify nominal frame render rates (20s) and junction temperatures (<70°C). If metrics remain degraded, the agent disallows the `PROTECTED` status, records the verified failure, and escalates to human technical directors.
+- **Generative AI is explanatory only**: Vertex AI Gemini 3.6 Flash is employed exclusively for explanatory synthesis (Step 3 Root Cause Deduction and Step 7 Producer Callsheet Briefings), translating raw correlated telemetry into actionable commercial language for delivery producers.
+
+## Live Observability & Grafana Control Tower
+
+A dedicated Grafana Cloud dashboard provides real-time visibility into the render farm's node temperatures, worker frame durations, and active render queue:
+- **Control Tower Dashboard**: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/d/callsheet-control-tower/callsheet-media-production-control-tower)
 
 ## Technologies Used
 
-- **Google Cloud AI**: Google Agent Development Kit (`google-adk`), Vertex AI Gemini (`google-genai`, `google-cloud-aiplatform`), Cloud Run, and Firestore.
-- **Grafana Stack**: Grafana Cloud, `grafana/mcp-grafana` MCP Server, Prometheus metrics, Loki logs, and OpenTelemetry ingestion.
+- **Google Cloud AI**: Google Agent Development Kit (`google-adk`), Vertex AI Gemini (`google-genai`, `google-cloud-aiplatform`), Cloud Run, and Cloud Build.
+- **Grafana Stack**: Grafana Cloud, `grafana/mcp-grafana` MCP Server, Prometheus metrics, Loki logs, and OpenTelemetry ingestion (Tempo traces).
 
 ## License
 
 This project is licensed under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
+

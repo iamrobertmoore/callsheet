@@ -216,3 +216,19 @@ class FarmWorker:
             shot_code=result["shot_code"],
         )
         return result
+
+    async def trigger_mission(self, show_id: str = "show-aethelgard", force_verification_fault: bool = False) -> Dict[str, Any]:
+        """Manually or programmatically triggers a mission run (e.g. from /demo or tests)."""
+        if not self.mission_runner:
+            raise RuntimeError("Mission runner not configured on worker.")
+        self.is_investigating = True
+        try:
+            res = await self.mission_runner.execute_mission(
+                show_id=show_id,
+                force_verification_fault=force_verification_fault,
+            )
+            self.latest_mission = res.model_dump(mode="json")
+            return self.latest_mission
+        finally:
+            self.is_investigating = False
+
