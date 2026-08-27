@@ -1,6 +1,6 @@
 # Callsheet
 
-Elena Vance is the delivery producer at Cinefex Northern Pictures, an independent visual effects house in Manchester. Her team finishes shots for episodic streaming television. Right now, Elena is responsible for delivering Chronicles of Aethelgard: Episode 6 by Thursday at 16:15 UTC. If her delivery slips past the contractual deadline, Cinefex incurs an immediate financial penalty of £25,000 per day.
+Elena Vance represents the delivery producer persona I designed Callsheet around: she works at an independent visual effects house like Cinefex Northern Pictures in Manchester. Her team finishes shots for episodic streaming television. Right now, Elena is responsible for delivering Chronicles of Aethelgard: Episode 6, facing a contractual delivery deadline later that afternoon. If her delivery slips past the contractual deadline, Cinefex incurs an immediate financial penalty of £25,000 per day.
 
 When a render blade degrades in the middle of the night, standard monitoring alerts an infrastructure engineer with hardware temperatures and fan speeds. That engineer is rarely equipped to evaluate shot dependencies, delivery buffers, or contractual SLA penalties. I built Callsheet for Elena and the studio crews who answer for delivery commitments.
 
@@ -31,11 +31,11 @@ Callsheet monitors render operations through Grafana Cloud over the Model Contex
           │
           ├─► Step 1: Anomaly Detection (Prometheus)                 [DETERMINISTIC TELEMETRY]
           ├─► Step 2: Correlation (Loki Logs & Tempo Traces)         [DETERMINISTIC TELEMETRY]
-          ├─► Step 3: Root Cause Isolation (Gemini 2.5 Flash)        [GENERATIVE AI]
+          ├─► Step 3: Root Cause Isolation (Gemini 3.6 Flash)        [GENERATIVE AI]
           ├─► Step 4: Production Impact Mapping                      [DETERMINISTIC ARITHMETIC]
           ├─► Step 5: Autonomous Workload Reallocation               [DETERMINISTIC ACTION]
           ├─► Step 6: Post-Intervention Verification (Grafana Cloud) [DETERMINISTIC VERIFICATION]
-          └─► Step 7: Producer Callsheet Briefing (Gemini 2.5 Flash) [GENERATIVE AI]
+          └─► Step 7: Producer Callsheet Briefing (Gemini 3.6 Flash) [GENERATIVE AI]
 ```
 
 ## Deterministic Action vs. Generative Explanation
@@ -45,7 +45,7 @@ A non-negotiable architectural principle in Callsheet is the boundary between de
 - Generative models cannot trigger, alter, or approve any operational intervention.
 - Interventions are 100% deterministic: Thermal limits (Step 1) and delivery buffer calculations (Step 4) are evaluated purely with mathematical arithmetic in Python. The workload failover (Step 5) is executed only when code assertions confirm a negative buffer margin and a thermal limit breach.
 - Verification closes the loop: Unlike competing tools that merely propose recommendations or assume success upon executing a command, Step 6 re-queries Grafana Cloud telemetry on the standby blade to independently verify nominal frame durations (20 seconds per frame) and stable junction temperatures. If metrics remain degraded, Callsheet rejects the `PROTECTED` status, records the verified fault, and escalates directly to human technical directors.
-- Generative AI is strictly explanatory: Vertex AI Gemini is employed exclusively for qualitative synthesis: Step 3 (deducing root causes from correlated logs and traces) and Step 7 (drafting plain-language correspondence briefings for delivery producers).
+- Generative AI is strictly explanatory: Vertex AI Gemini 3.6 Flash is employed exclusively for qualitative synthesis: Step 3 (deducing root causes from correlated logs and traces) and Step 7 (drafting plain-language correspondence briefings for delivery producers).
 
 ## Decision Path Integrity and the Rip-Out Test
 
