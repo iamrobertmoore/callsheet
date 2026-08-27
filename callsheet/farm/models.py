@@ -97,5 +97,4 @@ class FarmState(BaseModel):
     shots: dict[str, Shot] = Field(default_factory=dict)
     nodes: dict[str, RenderNode] = Field(default_factory=dict)
     active_scenario: ScenarioType = ScenarioType.BASELINE
-    host_benchmark: dict = Field(default_factory=dict)
     last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

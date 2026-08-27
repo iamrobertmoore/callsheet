@@ -89,7 +89,6 @@ async def get_farm_state():
         "shows": {k: v.model_dump(mode="json") for k, v in state.shows.items()},
         "nodes": {k: v.model_dump(mode="json") for k, v in state.nodes.items()},
         "shots": {k: v.model_dump(mode="json") for k, v in state.shots.items()},
-        "host_benchmark": state.host_benchmark,
         "latest_mission": worker.latest_mission,
         "is_investigating": worker.is_investigating,
         "interventions_count": len(dispatcher.history),
@@ -276,7 +275,7 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
                     </div>
                     <div class="metric-row">
                         <span>Buffer Margin</span>
-                        <span style="color: var(--success);">{buffer_margin}</span>
+                        <span style="color: var(--state-healthy);">{buffer_margin}</span>
                     </div>
                     <div class="metric-row">
                         <span>Daily Penalty</span>
@@ -294,15 +293,15 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
 
 def render_ssr_trail(steps: list) -> str:
     if not steps:
-        return '<div style="font-size: 12px; color: var(--text-muted);">No steps recorded.</div>'
+        return '<div style="font-size: 12px; color: var(--text-tertiary);">No steps recorded.</div>'
     import json
     entries = []
     badges = {
-        "DETERMINISTIC_TELEMETRY": '<span class="badge-type badge-telemetry">DETERMINISTIC TELEMETRY</span>',
-        "DETERMINISTIC_ARITHMETIC": '<span class="badge-type badge-arithmetic">DETERMINISTIC ARITHMETIC</span>',
-        "DETERMINISTIC_ACTION": '<span class="badge-type badge-action">DETERMINISTIC ACTION</span>',
-        "DETERMINISTIC_VERIFICATION": '<span class="badge-type badge-verification">DETERMINISTIC VERIFICATION</span>',
-        "GENERATIVE_SYNTHESIS": '<span class="badge-type badge-generative">GENERATIVE AI (EXPLANATORY)</span>',
+        "DETERMINISTIC_TELEMETRY": '<span class="badge-deterministic">⬡ DET: TELEMETRY</span>',
+        "DETERMINISTIC_ARITHMETIC": '<span class="badge-deterministic">⬡ DET: ARITHMETIC</span>',
+        "DETERMINISTIC_ACTION": '<span class="badge-deterministic">⬡ DET: WORKLOAD FAILOVER</span>',
+        "DETERMINISTIC_VERIFICATION": '<span class="badge-deterministic">⬡ DET: POST-AUDIT</span>',
+        "GENERATIVE_SYNTHESIS": '<span class="badge-generative">✦ GEN-AI: PRODUCER SYNTHESIS</span>',
     }
     for step in steps:
         step_num = step.get("step_number") if isinstance(step, dict) else getattr(step, "step_number", 1)
@@ -311,7 +310,13 @@ def render_ssr_trail(steps: list) -> str:
         exec_type = step.get("execution_type") if isinstance(step, dict) else getattr(step, "execution_type", "DETERMINISTIC_TELEMETRY")
         evidence = step.get("evidence") if isinstance(step, dict) else getattr(step, "evidence", {})
         evidence_str = json.dumps(evidence, indent=2) if evidence else ""
-        badge_html = badges.get(exec_type, '<span class="badge-type badge-telemetry">DETERMINISTIC</span>')
+
+        if step_num == 3:
+            badge_html = '<span class="badge-generative">✦ GEN-AI: ROOT CAUSE DEDUCTION</span>'
+        elif step_num == 7:
+            badge_html = '<span class="badge-generative">✦ GEN-AI: PRODUCER BRIEFING</span>'
+        else:
+            badge_html = badges.get(exec_type, '<span class="badge-deterministic">⬡ DETERMINISTIC</span>')
 
         entries.append(f"""
             <div class="step-entry">
@@ -356,28 +361,43 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
 
         if status_val == "QUARANTINED":
             quarantined_count += 1
-            node_class = "node-tile quarantined"
-            temp_color = "var(--danger)"
+            node_class = "node-tile node-quarantined"
+            temp_color = "var(--state-fault)"
             shot_label = "Quarantined (Fault)"
         elif is_standby:
             standby_count += 1
-            node_class = "node-tile standby"
-            temp_color = "var(--text-muted)"
+            node_class = "node-tile node-standby"
+            temp_color = "var(--text-tertiary)"
             shot_label = "Standby Spare"
         else:
             active_count += 1
-            if status_val == "THROTTLED" or temp > 90.0:
-                node_class = "node-tile throttled"
-                temp_color = "var(--danger)"
+            if status_val == "THROTTLED" or temp >= 90.0:
+                node_class = "node-tile node-fault"
+                temp_color = "var(--state-fault)"
                 shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Degraded (Fault)"
+            elif temp >= 78.0:
+                node_class = "node-tile node-hot"
+                temp_color = "var(--state-warn)"
+                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "High Load"
+            elif temp >= 68.0:
+                node_class = "node-tile node-warm"
+                temp_color = "var(--state-warn)"
+                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Warm Active"
+            elif temp >= 58.0:
+                node_class = "node-tile node-nominal"
+                temp_color = "var(--state-healthy)"
+                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Nominal"
             else:
-                node_class = "node-tile"
-                temp_color = "var(--success)"
-                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Idle"
+                node_class = "node-tile node-cool"
+                temp_color = "var(--state-healthy)"
+                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Cool Active"
 
         tiles.append(f"""
-            <div class="{node_class}">
-                <div class="node-id">{node_id}</div>
+            <div class="{node_class}" id="tile-{node_id}" data-node="{node_id}">
+                <div class="node-tile-header">
+                    <span class="node-id">{node_id}</span>
+                    <span class="node-pip"></span>
+                </div>
                 <div class="node-temp" style="color: {temp_color};">{temp:.1f}°C</div>
                 <div class="node-shot">{shot_label}</div>
             </div>
@@ -399,102 +419,159 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
     <title>Callsheet: Autonomous Operations Agent for Post-Production Delivery Producers</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg: #090d13;
-            --surface: #121820;
-            --surface-subtle: #171f2a;
-            --border: #232f3e;
-            --border-highlight: #2e3f54;
-            --text: #c2cbd6;
-            --text-heading: #f0f6fc;
-            --text-muted: #7d8b99;
-            --accent: #388bfd;
-            --success: #3fb950;
-            --success-bg: rgba(63, 185, 80, 0.15);
-            --danger: #f85149;
-            --danger-bg: rgba(248, 81, 73, 0.15);
-            --warning: #d29922;
-            --warning-bg: rgba(210, 153, 34, 0.15);
-            --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            --font-mono: 'JetBrains Mono', monospace;
+            /* Ground & Layered Surfaces */
+            --bg: #07090e;
+            --surface: #0e131b;
+            --surface-raised: #141b26;
+            --surface-inset: #090c12;
+
+            /* Hairline Separators in Two Weights */
+            --border-subtle: 1px solid rgba(255, 255, 255, 0.08);
+            --border-strong: 1px solid rgba(255, 255, 255, 0.16);
+
+            /* Infrastructure Accent (Studio Technical Cobalt/Cyan at 3 Alphas) */
+            --accent-solid: #0ea5e9;
+            --accent-line: rgba(14, 165, 233, 0.35);
+            --accent-wash: rgba(14, 165, 233, 0.10);
+
+            /* Semantic States (Reserved Strictly for Operational State) */
+            --state-healthy: #10b981;
+            --state-healthy-border: rgba(16, 185, 129, 0.35);
+            --state-healthy-wash: rgba(16, 185, 129, 0.08);
+
+            --state-warn: #f59e0b;
+            --state-warn-border: rgba(245, 158, 11, 0.35);
+            --state-warn-wash: rgba(245, 158, 11, 0.08);
+
+            --state-fault: #f43f5e;
+            --state-fault-border: rgba(244, 63, 94, 0.50);
+            --state-fault-wash: rgba(244, 63, 94, 0.12);
+
+            --state-standby: #64748b;
+            --state-standby-border: rgba(100, 116, 139, 0.25);
+            --state-standby-wash: rgba(100, 116, 139, 0.06);
+
+            /* Text Tints */
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-tertiary: #64748b;
+
+            /* Typography Stacks */
+            --font-display: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             background-color: var(--bg);
-            color: var(--text);
-            font-family: var(--font-main);
+            background-image: radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+            background-size: 24px 24px;
+            color: var(--text-secondary);
+            font-family: var(--font-body);
             padding: 24px;
             -webkit-font-smoothing: antialiased;
+            min-height: 100vh;
         }
 
         .container { max-width: 1400px; margin: 0 auto; }
 
+        /* Header Bar */
         header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             padding-bottom: 20px;
-            border-bottom: 1px solid var(--border);
+            border-bottom: var(--border-subtle);
             margin-bottom: 24px;
         }
 
         .brand h1 {
-            font-size: 20px;
+            font-family: var(--font-display);
+            font-size: 22px;
             font-weight: 700;
-            color: var(--text-heading);
-            letter-spacing: -0.5px;
+            color: var(--text-primary);
+            letter-spacing: -0.02em;
         }
 
         .brand p {
             font-size: 13px;
-            color: var(--text-muted);
-            margin-top: 2px;
+            color: var(--text-tertiary);
+            margin-top: 3px;
         }
 
         .header-meta {
             display: flex;
             align-items: center;
-            gap: 16px;
+            gap: 14px;
+        }
+
+        .btn-grafana {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            color: var(--accent-solid);
+            background: var(--accent-wash);
+            border: 1px solid var(--accent-line);
+            border-radius: 4px;
+            text-decoration: none;
+            transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+        }
+
+        .btn-grafana:hover {
+            background: rgba(14, 165, 233, 0.20);
+            border-color: var(--accent-solid);
+            color: var(--text-primary);
+            text-decoration: none;
         }
 
         .utc-clock {
             font-family: var(--font-mono);
-            font-size: 13px;
-            color: var(--text);
+            font-size: 12px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            color: var(--text-primary);
             background: var(--surface);
             padding: 6px 12px;
             border-radius: 4px;
-            border: 1px solid var(--border);
+            border: var(--border-subtle);
         }
 
         .status-badge {
             display: flex;
             align-items: center;
             gap: 8px;
-            font-size: 12px;
+            font-family: var(--font-display);
+            font-size: 11px;
             font-weight: 600;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
             padding: 6px 12px;
             border-radius: 4px;
         }
 
         .badge-live {
-            background: var(--success-bg);
-            color: var(--success);
-            border: 1px solid rgba(63, 185, 80, 0.3);
+            background: var(--state-healthy-wash);
+            color: var(--state-healthy);
+            border: 1px solid var(--state-healthy-border);
         }
 
         .badge-investigating {
-            background: var(--warning-bg);
-            color: var(--warning);
-            border: 1px solid rgba(210, 153, 34, 0.3);
+            background: var(--state-warn-wash);
+            color: var(--state-warn);
+            border: 1px solid var(--state-warn-border);
         }
 
         .badge-pulse {
-            width: 8px;
-            height: 8px;
+            width: 6px;
+            height: 6px;
             border-radius: 50%;
             background: currentColor;
             animation: pulse 2s infinite;
@@ -502,98 +579,134 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         @keyframes pulse {
             0% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.4; transform: scale(0.9); }
+            50% { opacity: 0.35; transform: scale(0.85); }
             100% { opacity: 1; transform: scale(1); }
         }
 
-        /* Slate Cards */
+        /* Active Delivery Slate */
         .section-title {
-            font-size: 14px;
+            font-family: var(--font-display);
+            font-size: 12px;
             font-weight: 600;
-            color: var(--text-heading);
+            color: var(--text-tertiary);
             margin-bottom: 12px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.08em;
         }
 
         .slate-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
             gap: 16px;
-            margin-bottom: 28px;
+            margin-bottom: 24px;
         }
 
         .slate-card {
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: var(--border-subtle);
             border-radius: 6px;
-            padding: 16px;
-            transition: border-color 0.15s ease;
+            padding: 16px 18px;
+            transition: border-color 0.2s ease;
         }
 
         .slate-card.critical {
-            border-color: var(--border-highlight);
-            background: linear-gradient(180deg, var(--surface) 0%, rgba(23, 31, 42, 0.7) 100%);
+            border: var(--border-strong);
+            background: linear-gradient(180deg, var(--surface) 0%, #111722 100%);
+            position: relative;
+        }
+
+        .slate-card.critical::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--accent-solid);
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
         }
 
         .slate-header {
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            margin-bottom: 12px;
+            gap: 12px;
+            margin-bottom: 14px;
         }
 
         .show-title {
+            font-family: var(--font-display);
             font-size: 15px;
             font-weight: 600;
-            color: var(--text-heading);
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
         }
 
         .show-client {
             font-size: 12px;
-            color: var(--text-muted);
-            margin-top: 2px;
+            color: var(--text-tertiary);
+            margin-top: 3px;
         }
 
         .state-tag {
-            font-size: 11px;
+            font-family: var(--font-mono);
+            font-size: 10px;
             font-weight: 600;
-            padding: 2px 8px;
+            padding: 3px 8px;
             border-radius: 3px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.04em;
+            white-space: nowrap;
         }
 
-        .tag-scheduled { background: var(--success-bg); color: var(--success); }
-        .tag-protected { background: var(--success-bg); color: var(--success); border: 1px solid var(--success); }
-        .tag-at-risk { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }
+        .tag-scheduled {
+            background: var(--state-healthy-wash);
+            color: var(--state-healthy);
+            border: 1px solid var(--state-healthy-border);
+        }
+
+        .tag-protected {
+            background: var(--state-healthy-wash);
+            color: var(--state-healthy);
+            border: 1px solid var(--state-healthy);
+        }
+
+        .tag-at-risk {
+            background: var(--state-fault-wash);
+            color: var(--state-fault);
+            border: 1px solid var(--state-fault);
+        }
 
         .slate-metrics {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
-            margin-top: 14px;
+            gap: 12px;
             padding-top: 12px;
-            border-top: 1px solid var(--border);
-            font-size: 12px;
+            border-top: var(--border-subtle);
         }
 
         .metric-row span:first-child {
-            color: var(--text-muted);
+            font-size: 11px;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
             display: block;
             margin-bottom: 2px;
         }
 
         .metric-row span:last-child {
             font-family: var(--font-mono);
+            font-size: 13px;
             font-weight: 600;
-            color: var(--text-heading);
+            font-variant-numeric: tabular-nums;
+            color: var(--text-primary);
         }
 
-        /* Main Grid: Left Briefing, Right Fleet */
+        /* Main Workspace: Left Briefing & Audit, Right Fleet */
         .main-layout {
             display: grid;
-            grid-template-columns: 1.6fr 1fr;
+            grid-template-columns: 1.55fr 1fr;
             gap: 20px;
         }
 
@@ -603,267 +716,379 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .card {
             background: var(--surface);
-            border: 1px solid var(--border);
+            border: var(--border-subtle);
             border-radius: 6px;
-            padding: 18px;
+            padding: 20px;
         }
 
         .card-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 14px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: var(--border-subtle);
         }
 
         .card-heading {
-            font-size: 13px;
+            font-family: var(--font-display);
+            font-size: 12px;
             font-weight: 600;
-            color: var(--text-heading);
+            color: var(--text-primary);
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.06em;
         }
 
+        /* Producer Briefing (Calm, Readable Prose) */
         .briefing-content {
-            font-size: 13px;
-            line-height: 1.6;
-            color: var(--text);
+            font-family: var(--font-body);
+            font-size: 13.5px;
+            line-height: 1.65;
+            color: var(--text-primary);
+            max-width: 72ch;
         }
 
         .briefing-content h3 {
+            font-family: var(--font-display);
             font-size: 13px;
             font-weight: 600;
-            color: var(--accent);
+            color: var(--accent-solid);
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin: 14px 0 6px 0;
+            letter-spacing: 0.05em;
+            margin: 18px 0 8px 0;
         }
 
         .briefing-content p {
             margin-bottom: 12px;
-            color: var(--text);
+            color: var(--text-secondary);
+        }
+
+        .briefing-content p strong {
+            color: var(--text-primary);
+            font-weight: 600;
         }
 
         .briefing-content table {
             width: 100%;
             border-collapse: collapse;
-            margin: 12px 0;
-            font-size: 12px;
+            margin: 16px 0;
             font-family: var(--font-mono);
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            border: var(--border-subtle);
+            border-radius: 4px;
+            overflow: hidden;
         }
 
         .briefing-content th, .briefing-content td {
-            border: 1px solid var(--border);
-            padding: 8px 10px;
+            padding: 8px 12px;
             text-align: left;
+            border-bottom: var(--border-subtle);
         }
 
         .briefing-content th {
-            background: var(--surface-subtle);
-            color: var(--text-heading);
+            background: var(--surface-raised);
+            color: var(--text-primary);
             font-weight: 600;
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.04em;
+        }
+
+        .briefing-content tr:last-child td {
+            border-bottom: none;
         }
 
         .briefing-content ul {
-            padding-left: 18px;
-            margin-bottom: 12px;
+            padding-left: 20px;
+            margin-bottom: 14px;
         }
 
         .briefing-content li {
             margin-bottom: 6px;
+            color: var(--text-secondary);
         }
 
-        /* Expandable Reasoning Accordion */
+        /* Evidence Trail Accordion & Staggered Steps */
         details.trail-accordion {
-            background: var(--surface-subtle);
-            border: 1px solid var(--border);
+            background: var(--surface-inset);
+            border: var(--border-subtle);
             border-radius: 4px;
-            margin-top: 16px;
-            padding: 12px 16px;
+            margin-top: 20px;
+            padding: 14px 18px;
         }
 
         details.trail-accordion summary {
+            font-family: var(--font-display);
             font-size: 12px;
             font-weight: 600;
-            font-family: var(--font-mono);
-            color: var(--accent);
+            color: var(--accent-solid);
             cursor: pointer;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.05em;
+            user-select: none;
         }
 
         .step-timeline {
-            margin-top: 14px;
+            margin-top: 16px;
+            border-left: 1px solid var(--border-strong);
+            padding-left: 16px;
         }
 
         .step-entry {
-            border-left: 2px solid var(--border-highlight);
-            padding-left: 14px;
-            margin-bottom: 14px;
+            margin-bottom: 18px;
             position: relative;
+            opacity: 0;
+            transform: translateY(6px);
+            animation: stepReveal 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        .step-entry:nth-child(1) { animation-delay: 45ms; }
+        .step-entry:nth-child(2) { animation-delay: 90ms; }
+        .step-entry:nth-child(3) { animation-delay: 135ms; }
+        .step-entry:nth-child(4) { animation-delay: 180ms; }
+        .step-entry:nth-child(5) { animation-delay: 225ms; }
+        .step-entry:nth-child(6) { animation-delay: 270ms; }
+        .step-entry:nth-child(7) { animation-delay: 315ms; }
+
+        @keyframes stepReveal {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .step-entry::before {
             content: '';
             position: absolute;
-            left: -5px;
-            top: 4px;
-            width: 8px;
-            height: 8px;
+            left: -21px;
+            top: 5px;
+            width: 9px;
+            height: 9px;
             border-radius: 50%;
-            background: var(--accent);
+            background: var(--surface-raised);
+            border: 2px solid var(--accent-solid);
         }
 
         .step-title {
-            font-size: 12px;
+            font-family: var(--font-display);
+            font-size: 13px;
             font-weight: 600;
-            color: var(--text-heading);
+            color: var(--text-primary);
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 8px;
+            gap: 10px;
             flex-wrap: wrap;
         }
 
-        .badge-type {
+        /* Distinct Category Badges: Deterministic vs Generative */
+        .badge-deterministic {
             font-family: var(--font-mono);
-            font-size: 9px;
-            font-weight: 700;
-            letter-spacing: 0.5px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
             text-transform: uppercase;
-            padding: 2px 6px;
-            border-radius: 3px;
+            padding: 2px 8px;
+            border-radius: 2px;
+            color: #38bdf8;
+            background: rgba(56, 189, 248, 0.08);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
             white-space: nowrap;
         }
 
-        .badge-telemetry {
-            color: #38bdf8;
-            background: rgba(56, 189, 248, 0.12);
-            border: 1px solid rgba(56, 189, 248, 0.3);
-        }
-
-        .badge-arithmetic {
-            color: #34d399;
-            background: rgba(52, 211, 153, 0.12);
-            border: 1px solid rgba(52, 211, 153, 0.3);
-        }
-
-        .badge-action {
+        .badge-generative {
+            font-family: var(--font-body);
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            padding: 2px 10px;
+            border-radius: 9999px;
             color: #c084fc;
             background: rgba(192, 132, 252, 0.12);
-            border: 1px solid rgba(192, 132, 252, 0.3);
-        }
-
-        .badge-verification {
-            color: #2dd4bf;
-            background: rgba(45, 212, 191, 0.12);
-            border: 1px solid rgba(45, 212, 191, 0.3);
-        }
-
-        .badge-generative {
-            color: #fbbf24;
-            background: rgba(251, 191, 36, 0.12);
-            border: 1px solid rgba(251, 191, 36, 0.3);
-        }
-
-        .btn-grafana {
+            border: 1px solid rgba(192, 132, 252, 0.40);
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            padding: 4px 10px;
-            font-size: 11px;
-            font-weight: 600;
-            font-family: var(--font-mono);
-            color: #f97316;
-            background: rgba(249, 115, 22, 0.1);
-            border: 1px solid rgba(249, 115, 22, 0.35);
-            border-radius: 4px;
-            text-decoration: none;
-            transition: all 0.2s ease;
-        }
-
-        .btn-grafana:hover {
-            background: rgba(249, 115, 22, 0.2);
-            border-color: #f97316;
-            text-decoration: none;
+            gap: 4px;
+            white-space: nowrap;
         }
 
         .step-desc {
-            font-size: 12px;
-            color: var(--text-muted);
-            margin-top: 2px;
+            font-size: 12.5px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-top: 4px;
         }
 
         .step-evidence {
             font-family: var(--font-mono);
             font-size: 11px;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            padding: 6px 10px;
+            font-variant-numeric: tabular-nums;
+            background: var(--surface-inset);
+            border: var(--border-subtle);
+            padding: 8px 12px;
             border-radius: 3px;
-            margin-top: 6px;
-            color: var(--text);
-            word-break: break-all;
+            margin-top: 8px;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+            word-break: break-word;
         }
 
-        /* Fleet Grid */
+        /* Hero Fleet Telemetry Grid */
         .fleet-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-            gap: 8px;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            position: relative;
+        }
+
+        @media (max-width: 1200px) {
+            .fleet-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+
+        @media (max-width: 768px) {
+            .fleet-grid { grid-template-columns: repeat(2, 1fr); }
         }
 
         .node-tile {
-            background: var(--bg);
-            border: 1px solid var(--border);
+            background: var(--surface);
+            border: var(--border-subtle);
             border-radius: 4px;
-            padding: 10px 8px;
-            text-align: center;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 84px;
+            transition: border-color 0.2s ease, background-color 0.2s ease;
+            position: relative;
         }
 
-        .node-tile.throttled {
-            border-color: var(--danger);
-            background: var(--danger-bg);
-        }
-
-        .node-tile.quarantined {
-            border: 2px solid var(--danger);
-            background: var(--danger-bg);
-        }
-
-        .node-tile.standby {
-            border-style: dashed;
-            opacity: 0.75;
+        .node-tile-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
         .node-id {
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-heading);
             font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            letter-spacing: -0.01em;
+        }
+
+        .node-pip {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+            opacity: 0.85;
         }
 
         .node-temp {
             font-family: var(--font-mono);
-            font-size: 13px;
-            font-weight: 600;
-            margin: 4px 0;
+            font-size: 17px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            margin: 4px 0 2px 0;
+            letter-spacing: -0.02em;
         }
 
         .node-shot {
-            font-size: 10px;
-            color: var(--text-muted);
             font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-tertiary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Thermal State Scales */
+        .node-tile.node-cool {
+            background: rgba(16, 185, 129, 0.04);
+            border: 1px solid rgba(16, 185, 129, 0.20);
+        }
+        .node-tile.node-cool .node-pip { color: var(--state-healthy); }
+
+        .node-tile.node-nominal {
+            background: rgba(16, 185, 129, 0.08);
+            border: 1px solid rgba(16, 185, 129, 0.35);
+        }
+        .node-tile.node-nominal .node-pip { color: var(--state-healthy); }
+
+        .node-tile.node-warm {
+            background: rgba(245, 158, 11, 0.07);
+            border: 1px solid rgba(245, 158, 11, 0.30);
+        }
+        .node-tile.node-warm .node-pip { color: var(--state-warn); }
+
+        .node-tile.node-hot {
+            background: rgba(249, 115, 22, 0.10);
+            border: 1px solid rgba(249, 115, 22, 0.40);
+        }
+        .node-tile.node-hot .node-pip { color: #f97316; }
+
+        .node-tile.node-fault {
+            background: var(--state-fault-wash);
+            border: 1px solid var(--state-fault-border);
+        }
+        .node-tile.node-fault .node-pip { color: var(--state-fault); }
+
+        .node-tile.node-quarantined {
+            background: var(--state-fault-wash);
+            border: 1px solid var(--state-fault-border);
+            outline: 1px dashed var(--state-fault);
+            outline-offset: 2px;
+        }
+        .node-tile.node-quarantined .node-pip { color: var(--state-fault); }
+
+        .node-tile.node-standby {
+            background: var(--surface-inset);
+            border: 1px dashed var(--state-standby-border);
+            opacity: 0.65;
+        }
+        .node-tile.node-standby .node-pip { color: var(--state-standby); }
+
+        /* Signature Failover Takeover Arrival Pulse */
+        .node-takeover-pulse {
+            animation: takeoverPulse 1.2s ease-out;
+        }
+
+        @keyframes takeoverPulse {
+            0% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(14, 165, 233, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0); }
         }
 
         .footer-note {
             text-align: center;
             font-size: 11px;
-            color: var(--text-muted);
-            margin-top: 32px;
+            font-family: var(--font-mono);
+            color: var(--text-tertiary);
+            margin-top: 36px;
             padding-top: 16px;
-            border-top: 1px solid var(--border);
+            border-top: var(--border-subtle);
+        }
+
+        /* Reduced Motion Fallback */
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+            .step-entry {
+                opacity: 1 !important;
+                transform: none !important;
+                animation: none !important;
+            }
+            .badge-pulse {
+                animation: none !important;
+            }
         }
     </style>
 </head>
@@ -899,7 +1124,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             <div class="card">
                 <div class="card-header">
                     <span class="card-heading">Production Callsheet Briefing</span>
-                    <span id="briefing-timestamp" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);"><!-- SSR_BRIEFING_TIME --></span>
+                    <span id="briefing-timestamp" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-tertiary);"><!-- SSR_BRIEFING_TIME --></span>
                 </div>
 
                 <div id="briefing-container" class="briefing-content">
@@ -919,7 +1144,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 <div class="card">
                     <div class="card-header">
                         <span class="card-heading">Render Fleet Telemetry (12 Nodes)</span>
-                        <span id="fleet-summary" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-muted);"><!-- SSR_FLEET_SUMMARY --></span>
+                        <span id="fleet-summary" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-tertiary);"><!-- SSR_FLEET_SUMMARY --></span>
                     </div>
                     <div id="fleet-container" class="fleet-grid">
 <!-- SSR_FLEET -->
@@ -985,6 +1210,80 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             return html;
         }
 
+        function triggerFailoverMotion(sourceId, targetId) {
+            if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+            const source = document.getElementById('tile-' + sourceId);
+            const target = document.getElementById('tile-' + targetId);
+            const grid = document.getElementById('fleet-container');
+            if (!source || !target || !grid) return;
+
+            const gridRect = grid.getBoundingClientRect();
+            const sRect = source.getBoundingClientRect();
+            const tRect = target.getBoundingClientRect();
+
+            const startX = sRect.left - gridRect.left + sRect.width / 2;
+            const startY = sRect.top - gridRect.top + sRect.height / 2;
+            const endX = tRect.left - gridRect.left + tRect.width / 2;
+            const endY = tRect.top - gridRect.top + tRect.height / 2;
+
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('class', 'failover-svg-overlay');
+            svg.style.position = 'absolute';
+            svg.style.top = '0';
+            svg.style.left = '0';
+            svg.style.width = '100%';
+            svg.style.height = '100%';
+            svg.style.pointerEvents = 'none';
+            svg.style.zIndex = '10';
+
+            const dx = endX - startX;
+            const dy = endY - startY;
+            const cx = startX + dx * 0.5 - (dy * 0.15);
+            const cy = startY + dy * 0.5 - Math.abs(dx * 0.15) - 25;
+            const pathD = `M ${startX} ${startY} Q ${cx} ${cy} ${endX} ${endY}`;
+
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', pathD);
+            path.setAttribute('fill', 'none');
+            path.setAttribute('stroke', 'rgba(14, 165, 233, 0.45)');
+            path.setAttribute('stroke-width', '1.5');
+            path.setAttribute('stroke-dasharray', '4 4');
+
+            const bead = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            bead.setAttribute('r', '4.5');
+            bead.setAttribute('fill', '#0ea5e9');
+
+            svg.appendChild(path);
+            svg.appendChild(bead);
+            grid.appendChild(svg);
+
+            const startTime = performance.now();
+            const duration = 1200;
+            const pathLen = path.getTotalLength();
+
+            function step(now) {
+                const elapsed = now - startTime;
+                const p = Math.min(elapsed / duration, 1.0);
+                // Cubic ease-out
+                const ease = 1 - Math.pow(1 - p, 3);
+                const pt = path.getPointAtLength(ease * pathLen);
+                bead.setAttribute('cx', pt.x);
+                bead.setAttribute('cy', pt.y);
+
+                if (p < 1.0) {
+                    requestAnimationFrame(step);
+                } else {
+                    target.classList.add('node-takeover-pulse');
+                    setTimeout(() => {
+                        svg.style.transition = 'opacity 0.6s ease';
+                        svg.style.opacity = '0';
+                        setTimeout(() => svg.remove(), 600);
+                    }, 800);
+                }
+            }
+            requestAnimationFrame(step);
+        }
+
         async function fetchState() {
             try {
                 const res = await fetch('/api/state');
@@ -1032,9 +1331,9 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 if (s.id === 'show-aethelgard') {
                     if (isIntervened) {
                         statusTag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>';
-                        bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.9).toFixed(1) + ' hours';
+                        bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.8).toFixed(1) + ' hours';
                     } else {
-                        bufferMargin = '+2.9 hours';
+                        bufferMargin = '+2.8 hours';
                     }
                 } else if (s.id === 'show-solarflare' || s.id === 'show-solar') {
                     bufferMargin = '+5.5 hours';
@@ -1069,7 +1368,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                             </div>
                             <div class="metric-row">
                                 <span>Buffer Margin</span>
-                                <span style="color: var(--success);">${bufferMargin}</span>
+                                <span style="color: var(--state-healthy);">${bufferMargin}</span>
                             </div>
                             <div class="metric-row">
                                 <span>Daily Penalty</span>
@@ -1094,7 +1393,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 const utcHours = String(dateObj.getUTCHours()).padStart(2, '0');
                 const utcMinutes = String(dateObj.getUTCMinutes()).padStart(2, '0');
                 const utcSeconds = String(dateObj.getUTCSeconds()).padStart(2, '0');
-                timeLabel.innerText = `Last completed mission: ${utcHours}:${utcMinutes}:${utcSeconds} UTC`;
+                timeLabel.innerText = `Mission logged: ${utcHours}:${utcMinutes}:${utcSeconds} UTC`;
             }
 
             container.innerHTML = formatMarkdown(mission.callsheet_briefing);
@@ -1103,9 +1402,17 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         function renderTrail(steps) {
             const container = document.getElementById('trail-container');
             if (!steps || !steps.length) {
-                container.innerHTML = '<div style="font-size: 12px; color: var(--text-muted);">No steps recorded.</div>';
+                container.innerHTML = '<div style="font-size: 12px; color: var(--text-tertiary);">No steps recorded.</div>';
                 return;
             }
+
+            const badges = {
+                'DETERMINISTIC_TELEMETRY': '<span class="badge-deterministic">⬡ DET: TELEMETRY</span>',
+                'DETERMINISTIC_ARITHMETIC': '<span class="badge-deterministic">⬡ DET: ARITHMETIC</span>',
+                'DETERMINISTIC_ACTION': '<span class="badge-deterministic">⬡ DET: WORKLOAD FAILOVER</span>',
+                'DETERMINISTIC_VERIFICATION': '<span class="badge-deterministic">⬡ DET: POST-AUDIT</span>',
+                'GENERATIVE_SYNTHESIS': '<span class="badge-generative">✦ GEN-AI: PRODUCER SYNTHESIS</span>',
+            };
 
             container.innerHTML = steps.map(step => {
                 let evidenceStr = '';
@@ -1114,30 +1421,25 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 }
 
                 const execType = step.execution_type || 'DETERMINISTIC_TELEMETRY';
-                let badgeClass = 'badge-telemetry';
-                let badgeLabel = 'DETERMINISTIC TELEMETRY';
-                if (execType === 'DETERMINISTIC_ARITHMETIC') {
-                    badgeClass = 'badge-arithmetic';
-                    badgeLabel = 'DETERMINISTIC ARITHMETIC';
-                } else if (execType === 'DETERMINISTIC_ACTION') {
-                    badgeClass = 'badge-action';
-                    badgeLabel = 'DETERMINISTIC ACTION';
-                } else if (execType === 'DETERMINISTIC_VERIFICATION') {
-                    badgeClass = 'badge-verification';
-                    badgeLabel = 'DETERMINISTIC VERIFICATION';
-                } else if (execType === 'GENERATIVE_SYNTHESIS') {
-                    badgeClass = 'badge-generative';
-                    badgeLabel = 'GENERATIVE AI (EXPLANATORY)';
+                const stepNum = step.step_number || 1;
+                let badgeHtml = '<span class="badge-deterministic">⬡ DETERMINISTIC</span>';
+
+                if (stepNum === 3) {
+                    badgeHtml = '<span class="badge-generative">✦ GEN-AI: ROOT CAUSE DEDUCTION</span>';
+                } else if (stepNum === 7) {
+                    badgeHtml = '<span class="badge-generative">✦ GEN-AI: PRODUCER BRIEFING</span>';
+                } else if (badges[execType]) {
+                    badgeHtml = badges[execType];
                 }
 
                 return `
                     <div class="step-entry">
                         <div class="step-title">
-                            <span>Step ${step.step_number}: ${step.name}</span>
-                            <span class="badge-type ${badgeClass}">${badgeLabel}</span>
+                            <span>Step ${stepNum}: ${step.name}</span>
+                            ${badgeHtml}
                         </div>
                         <div class="step-desc">${step.description}</div>
-                        ${evidenceStr && evidenceStr !== '{}' ? `<div class="step-evidence">${evidenceStr}</div>` : ''}
+                        ${evidenceStr && evidenceStr !== '{}' ? `<pre class="step-evidence">${evidenceStr}</pre>` : ''}
                     </div>
                 `;
             }).join('');
@@ -1161,7 +1463,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
             container.innerHTML = nodeList.map(n => {
                 let nodeClass = 'node-tile';
-                let tempColor = 'var(--success)';
+                let tempColor = 'var(--state-healthy)';
                 let shotLabel = 'Idle';
                 let tempVal = n.temperature_celsius;
 
@@ -1172,30 +1474,66 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 }
 
                 if (n.status === 'QUARANTINED') {
-                    nodeClass += ' quarantined';
-                    tempColor = 'var(--danger)';
+                    nodeClass += ' node-quarantined';
+                    tempColor = 'var(--state-fault)';
                     shotLabel = 'Quarantined (Fault)';
-                } else if (n.status === 'THROTTLED' || tempVal > 90) {
-                    nodeClass += ' throttled';
-                    tempColor = 'var(--danger)';
-                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Degraded (Fault)';
                 } else if (n.is_standby) {
-                    nodeClass += ' standby';
-                    tempColor = 'var(--text-muted)';
+                    nodeClass += ' node-standby';
+                    tempColor = 'var(--text-tertiary)';
                     shotLabel = 'Standby Spare';
+                } else if (n.status === 'THROTTLED' || tempVal >= 90) {
+                    nodeClass += ' node-fault';
+                    tempColor = 'var(--state-fault)';
+                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Degraded (Fault)';
+                } else if (tempVal >= 78.0) {
+                    nodeClass += ' node-hot';
+                    tempColor = 'var(--state-warn)';
+                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'High Load';
+                } else if (tempVal >= 68.0) {
+                    nodeClass += ' node-warm';
+                    tempColor = 'var(--state-warn)';
+                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Warm Active';
+                } else if (tempVal >= 58.0) {
+                    nodeClass += ' node-nominal';
+                    tempColor = 'var(--state-healthy)';
+                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Nominal';
                 } else {
-                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Idle';
+                    nodeClass += ' node-cool';
+                    tempColor = 'var(--state-healthy)';
+                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Cool Active';
                 }
 
                 return `
-                    <div class="${nodeClass}">
-                        <div class="node-id">${n.id}</div>
+                    <div class="${nodeClass}" id="tile-${n.id}" data-node="${n.id}">
+                        <div class="node-tile-header">
+                            <span class="node-id">${n.id}</span>
+                            <span class="node-pip"></span>
+                        </div>
                         <div class="node-temp" style="color: ${tempColor};">${tempVal.toFixed(1)}°C</div>
                         <div class="node-shot">${shotLabel}</div>
                     </div>
                 `;
             }).join('');
+
+            // Trigger signature failover transfer motion once on load if an intervention happened
+            if (!window.__failoverAnimated && (quarantinedCount > 0 || (latestMission && latestMission.intervention_record))) {
+                window.__failoverAnimated = true;
+                setTimeout(() => {
+                    triggerFailoverMotion('node-07', 'node-11');
+                }, 400);
+            }
         }
+
+        // On DOMContentLoaded, trigger failover motion if rendered server-side with quarantined node
+        document.addEventListener('DOMContentLoaded', () => {
+            const qTile = document.getElementById('tile-node-07');
+            if (qTile && qTile.classList.contains('node-quarantined') && !window.__failoverAnimated) {
+                window.__failoverAnimated = true;
+                setTimeout(() => {
+                    triggerFailoverMotion('node-07', 'node-11');
+                }, 500);
+            }
+        });
 
         // Poll state every 3 seconds
         setInterval(fetchState, 3000);

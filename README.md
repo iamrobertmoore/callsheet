@@ -52,7 +52,7 @@ Callsheet enforces strict telemetry boundary isolation across its entire decisio
 - **The Rip-Out Test**: The evidence of this isolation is that pointing the mission at an offline, unconfigured, or unreachable Grafana instance causes the mission to fail immediately and outright. There are no silent fallbacks, in-memory cheats, or mocked data side-channels.
 - **What the Farm Is**: The synthetic farm is an operational simulator that emits genuine OpenTelemetry metrics (Prometheus), structured logs (Loki), and distributed trace spans (Tempo) to a real Grafana Cloud stack via an OTLP gateway. The agent queries that telemetry back through MCP exactly as it would against physical on-premise blade servers, AWS Deadline nodes, or Pixar Tractor workers.
 - **Transition to Physical Infrastructure**: To point Callsheet at physical studio infrastructure, only the telemetry emitter changes. The agent, reasoning loop, MCP tools, arithmetic gates, and briefing pipelines remain 100% identical.
-- **Measured Hardware Baseline**: The nominal 20.0s frame rendering baseline is not an arbitrary asserted constant. It is calibrated at container startup by running a real CPU compute benchmark directly on the host instance, with deterministic downstream arithmetic derived from that measured baseline.
+- **Simulator Baseline Render Rate**: The baseline render rate (20.0 seconds per frame) is an explicit stated parameter of the simulator representing nominal throughput, rather than a wall-clock measurement subject to vCPU jitter. Downstream contractual buffer arithmetic is derived deterministically from this stated baseline.
 
 ## Live Observability & Grafana Control Tower
 
