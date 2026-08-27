@@ -57,7 +57,7 @@ Callsheet enforces strict telemetry boundary isolation across its entire decisio
 ## Live Observability & Grafana Control Tower
 
 A dedicated Grafana Cloud dashboard provides real-time visibility into the render farm's node temperatures, worker frame durations, and active render queue:
-- **Control Tower Dashboard**: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/d/callsheet-control-tower/callsheet-media-production-control-tower)
+- **Control Tower Dashboard**: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd)
 
 ## Technologies Used
 
