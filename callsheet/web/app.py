@@ -1064,6 +1064,38 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             100% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0); }
         }
 
+        .orienting-band {
+            background: var(--surface);
+            border: var(--border-subtle);
+            border-left: 2px solid var(--accent-solid);
+            border-radius: 6px;
+            padding: 16px 20px;
+            margin-bottom: 24px;
+        }
+
+        .orienting-text {
+            font-size: 13.5px;
+            line-height: 1.65;
+            color: var(--text-secondary);
+            max-width: 90ch;
+        }
+
+        .orienting-text strong {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .orienting-thesis {
+            font-family: var(--font-display);
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: var(--border-subtle);
+        }
+
         .footer-note {
             text-align: center;
             font-size: 11px;
@@ -1072,6 +1104,10 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             margin-top: 36px;
             padding-top: 16px;
             border-top: var(--border-subtle);
+            line-height: 1.6;
+            max-width: 860px;
+            margin-left: auto;
+            margin-right: auto;
         }
 
         /* Reduced Motion Fallback */
@@ -1111,6 +1147,16 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 </div>
             </div>
         </header>
+
+        <!-- Orienting Mission Band -->
+        <div class="orienting-band">
+            <p class="orienting-text">
+                Callsheet watches a post-production render farm and protects contractual delivery dates. When a node degrades, it works out which shots are at risk, moves them to spare capacity, verifies the fix in the telemetry, and reports what it did in plain language a producer can forward to a client. <strong>Everything below happened automatically. Nobody pressed anything.</strong>
+            </p>
+            <div class="orienting-thesis">
+                "Without Grafana, Callsheet would be a post-mortem tool that tells you why you missed the deadline after the money is already lost."
+            </div>
+        </div>
 
         <!-- Delivery Slate -->
         <div class="section-title">Active Delivery Slate</div>
@@ -1154,7 +1200,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div class="footer-note">
-            Callsheet Autonomous Post-Production Agent. Telemetry streamed continuously via OpenTelemetry OTLP to Grafana Cloud.
+            Callsheet Autonomous Post-Production Agent. The render farm is a simulator emitting genuine OpenTelemetry metrics, logs and traces to Grafana Cloud, and the agent reads that telemetry back through the Grafana MCP server exactly as it would read a real farm.
         </div>
     </div>
 
