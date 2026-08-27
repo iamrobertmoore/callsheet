@@ -89,6 +89,7 @@ async def get_farm_state():
         "shows": {k: v.model_dump(mode="json") for k, v in state.shows.items()},
         "nodes": {k: v.model_dump(mode="json") for k, v in state.nodes.items()},
         "shots": {k: v.model_dump(mode="json") for k, v in state.shots.items()},
+        "host_benchmark": state.host_benchmark,
         "latest_mission": worker.latest_mission,
         "is_investigating": worker.is_investigating,
         "interventions_count": len(dispatcher.history),
