@@ -241,21 +241,21 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
 
         if show_id == 'show-aethelgard':
             if is_intervened:
-                status_tag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>'
+                status_tag = '<span class="state-tag tag-protected">PROTECTED</span>'
                 rec = mission.get("intervention_record", {})
                 margin_val = rec.get("buffer_margin_hours", 2.8) if isinstance(rec, dict) else getattr(rec, "buffer_margin_hours", 2.8)
                 buffer_margin = f'+{margin_val:.1f} hours'
             else:
-                status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+                status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
                 buffer_margin = '+2.8 hours'
         elif show_id in ('show-solarflare', 'show-solar'):
-            status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+            status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
             buffer_margin = '+5.5 hours'
         elif show_id == 'show-abyssal':
-            status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+            status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
             buffer_margin = '+9.4 hours'
         else:
-            status_tag = '<span class="state-tag tag-scheduled">On Schedule</span>'
+            status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
             buffer_margin = '+4.0 hours'
 
         crit_class = ' critical' if critical else ''
@@ -270,20 +270,20 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
                 </div>
                 <div class="slate-metrics">
                     <div class="metric-row">
-                        <span>Deadline</span>
-                        <span>{deadline_str}</span>
+                        <span class="metric-label">DEADLINE</span>
+                        <span class="metric-val">{deadline_str}</span>
                     </div>
                     <div class="metric-row">
-                        <span>Buffer Margin</span>
-                        <span style="color: var(--state-healthy);">{buffer_margin}</span>
+                        <span class="metric-label">BUFFER MARGIN</span>
+                        <span class="metric-val metric-healthy">{buffer_margin}</span>
                     </div>
                     <div class="metric-row">
-                        <span>Daily Penalty</span>
-                        <span>£{penalty:,.0f} / day</span>
+                        <span class="metric-label">DAILY PENALTY</span>
+                        <span class="metric-val">£{penalty:,.0f} / day</span>
                     </div>
                     <div class="metric-row">
-                        <span>Priority Tier</span>
-                        <span>{'Critical Path' if critical else 'Standard'}</span>
+                        <span class="metric-label">PRIORITY TIER</span>
+                        <span class="metric-val">{'CRITICAL PATH' if critical else 'STANDARD'}</span>
                     </div>
                 </div>
             </div>
@@ -293,16 +293,9 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
 
 def render_ssr_trail(steps: list) -> str:
     if not steps:
-        return '<div style="font-size: 12px; color: var(--text-tertiary);">No steps recorded.</div>'
+        return '<div style="font-size: 12px; color: var(--text-dim);">No steps recorded.</div>'
     import json
     entries = []
-    badges = {
-        "DETERMINISTIC_TELEMETRY": '<span class="badge-deterministic">⬡ DET: TELEMETRY</span>',
-        "DETERMINISTIC_ARITHMETIC": '<span class="badge-deterministic">⬡ DET: ARITHMETIC</span>',
-        "DETERMINISTIC_ACTION": '<span class="badge-deterministic">⬡ DET: WORKLOAD FAILOVER</span>',
-        "DETERMINISTIC_VERIFICATION": '<span class="badge-deterministic">⬡ DET: POST-AUDIT</span>',
-        "GENERATIVE_SYNTHESIS": '<span class="badge-generative">✦ GEN-AI: PRODUCER SYNTHESIS</span>',
-    }
     for step in steps:
         step_num = step.get("step_number") if isinstance(step, dict) else getattr(step, "step_number", 1)
         name = step.get("name") if isinstance(step, dict) else getattr(step, "name", "")
@@ -311,17 +304,15 @@ def render_ssr_trail(steps: list) -> str:
         evidence = step.get("evidence") if isinstance(step, dict) else getattr(step, "evidence", {})
         evidence_str = json.dumps(evidence, indent=2) if evidence else ""
 
-        if step_num == 3:
-            badge_html = '<span class="badge-generative">✦ GEN-AI: ROOT CAUSE DEDUCTION</span>'
-        elif step_num == 7:
-            badge_html = '<span class="badge-generative">✦ GEN-AI: PRODUCER BRIEFING</span>'
+        if step_num in (3, 7) or exec_type == "GENERATIVE_SYNTHESIS":
+            badge_html = '<span class="badge-gen">GENERATIVE AI</span>'
         else:
-            badge_html = badges.get(exec_type, '<span class="badge-deterministic">⬡ DETERMINISTIC</span>')
+            badge_html = '<span class="badge-det">DETERMINISTIC</span>'
 
         entries.append(f"""
             <div class="step-entry">
                 <div class="step-title">
-                    <span>Step {step_num}: {name}</span>
+                    <span>STEP {step_num}: {name.upper()}</span>
                     {badge_html}
                 </div>
                 <div class="step-desc">{desc}</div>
@@ -334,7 +325,7 @@ def render_ssr_trail(steps: list) -> str:
 def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, str]:
     node_list = list(nodes.values())
     if not node_list:
-        return '<div>Loading node status...</div>', '10 Active / 2 Standby'
+        return '<div>Loading node status...</div>', '10 ACTIVE / 2 STANDBY'
 
     active_count = 0
     quarantined_count = 0
@@ -349,7 +340,6 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
         temp = n.temperature_celsius if hasattr(n, "temperature_celsius") else n.get("temperature_celsius", 55.0)
         shot_id = n.current_shot_id if hasattr(n, "current_shot_id") else n.get("current_shot_id")
 
-        # Ensure node-07 reads the locked incident temperature from evidence
         if node_id == "node-07" and (status_val in ("QUARANTINED", "THROTTLED") or temp > 90.0):
             if mission and mission.get("intervention_record"):
                 rec_ev = mission.get("intervention_record", {}).get("telemetry_evidence", {})
@@ -362,40 +352,40 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
         if status_val == "QUARANTINED":
             quarantined_count += 1
             node_class = "node-tile node-quarantined"
-            temp_color = "var(--state-fault)"
-            shot_label = "Quarantined (Fault)"
+            temp_color = "var(--heat-fault)"
+            shot_label = "QUARANTINED (FAULT)"
         elif is_standby:
             standby_count += 1
             node_class = "node-tile node-standby"
-            temp_color = "var(--text-tertiary)"
-            shot_label = "Standby Spare"
+            temp_color = "var(--text-dim)"
+            shot_label = "STANDBY SPARE"
         else:
             active_count += 1
             if status_val == "THROTTLED" or temp >= 90.0:
                 node_class = "node-tile node-fault"
-                temp_color = "var(--state-fault)"
-                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Degraded (Fault)"
+                temp_color = "var(--heat-fault)"
+                shot_label = f"SHOT {shot_id.replace('sh_', '')}" if shot_id else "DEGRADED (FAULT)"
             elif temp >= 78.0:
                 node_class = "node-tile node-hot"
-                temp_color = "var(--state-warn)"
-                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "High Load"
+                temp_color = "var(--heat-hot)"
+                shot_label = f"SHOT {shot_id.replace('sh_', '')}" if shot_id else "HIGH LOAD"
             elif temp >= 68.0:
                 node_class = "node-tile node-warm"
-                temp_color = "var(--state-warn)"
-                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Warm Active"
+                temp_color = "var(--heat-warm)"
+                shot_label = f"SHOT {shot_id.replace('sh_', '')}" if shot_id else "WARM ACTIVE"
             elif temp >= 58.0:
                 node_class = "node-tile node-nominal"
                 temp_color = "var(--state-healthy)"
-                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Nominal"
+                shot_label = f"SHOT {shot_id.replace('sh_', '')}" if shot_id else "NOMINAL"
             else:
                 node_class = "node-tile node-cool"
                 temp_color = "var(--state-healthy)"
-                shot_label = f"Shot {shot_id.replace('sh_', '')}" if shot_id else "Cool Active"
+                shot_label = f"SHOT {shot_id.replace('sh_', '')}" if shot_id else "COOL ACTIVE"
 
         tiles.append(f"""
             <div class="{node_class}" id="tile-{node_id}" data-node="{node_id}">
                 <div class="node-tile-header">
-                    <span class="node-id">{node_id}</span>
+                    <span class="node-id">{node_id.upper()}</span>
                     <span class="node-pip"></span>
                 </div>
                 <div class="node-temp" style="color: {temp_color};">{temp:.1f}°C</div>
@@ -404,9 +394,9 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
         """)
 
     if quarantined_count > 0:
-        summary_str = f"{active_count} Active / {quarantined_count} Quarantined / {standby_count} Standby"
+        summary_str = f"{active_count} ACTIVE / {quarantined_count} QUARANTINED / {standby_count} STANDBY"
     else:
-        summary_str = f"{active_count} Active / {standby_count} Standby"
+        summary_str = f"{active_count} ACTIVE / {standby_count} STANDBY"
 
     return ''.join(tiles), summary_str
 
@@ -419,212 +409,269 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
     <title>Callsheet: Autonomous Operations Agent for Post-Production Delivery Producers</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&display=swap" rel="stylesheet">
     <style>
         :root {
-            /* Ground & Layered Surfaces */
-            --bg: #07090e;
-            --surface: #0e131b;
-            --surface-raised: #141b26;
-            --surface-inset: #090c12;
+            /* Finishing Suite Neutral Charcoal Ground & Graphite Surfaces */
+            --bg: #121211;
+            --surface: #191817;
+            --surface-raised: #21201f;
+            --surface-inset: #0c0c0b;
 
-            /* Hairline Separators in Two Weights */
-            --border-subtle: 1px solid rgba(255, 255, 255, 0.08);
-            --border-strong: 1px solid rgba(255, 255, 255, 0.16);
+            /* Hairlines in Two Weights (Paperwork Rules) */
+            --rule: rgba(235, 230, 220, 0.10);
+            --rule-strong: rgba(235, 230, 220, 0.22);
 
-            /* Infrastructure Accent (Studio Technical Cobalt/Cyan at 3 Alphas) */
-            --accent-solid: #0ea5e9;
-            --accent-line: rgba(14, 165, 233, 0.35);
-            --accent-wash: rgba(14, 165, 233, 0.10);
+            /* Text Tints: Bone, Warm Stone, Graphite Dim */
+            --text-primary: #ede9e3;
+            --text-secondary: #9c978e;
+            --text-dim: #66635d;
 
-            /* Semantic States (Reserved Strictly for Operational State) */
-            --state-healthy: #10b981;
-            --state-healthy-border: rgba(16, 185, 129, 0.35);
-            --state-healthy-wash: rgba(16, 185, 129, 0.08);
+            /* Sparing Neutral Accent: Studio Titanium / Bone */
+            --accent: #ded8cb;
 
-            --state-warn: #f59e0b;
-            --state-warn-border: rgba(245, 158, 11, 0.35);
-            --state-warn-wash: rgba(245, 158, 11, 0.08);
+            /* Semantic Healthy / Protected: Low Saturation Sage */
+            --state-healthy: #62a884;
+            --state-healthy-wash: rgba(98, 168, 132, 0.08);
+            --state-healthy-border: rgba(98, 168, 132, 0.28);
 
-            --state-fault: #f43f5e;
-            --state-fault-border: rgba(244, 63, 94, 0.50);
-            --state-fault-wash: rgba(244, 63, 94, 0.12);
+            /* Thermal Scale (Strictly Reserved for Heat on the Fleet Grid) */
+            --heat-warm: #d97706;
+            --heat-hot: #ea580c;
+            --heat-fault: #e11d48;
 
-            --state-standby: #64748b;
-            --state-standby-border: rgba(100, 116, 139, 0.25);
-            --state-standby-wash: rgba(100, 116, 139, 0.06);
-
-            /* Text Tints */
-            --text-primary: #f8fafc;
-            --text-secondary: #94a3b8;
-            --text-tertiary: #64748b;
-
-            /* Typography Stacks */
-            --font-display: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+            /* Typography */
+            --font-condensed: 'Barlow Condensed', 'Archivo Narrow', -apple-system, sans-serif;
+            --font-serif: 'Newsreader', Georgia, 'Times New Roman', serif;
+            --font-sans: 'Barlow', 'Inter', -apple-system, sans-serif;
+            --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             background-color: var(--bg);
-            background-image: radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px);
-            background-size: 24px 24px;
             color: var(--text-secondary);
-            font-family: var(--font-body);
-            padding: 24px;
+            font-family: var(--font-sans);
+            padding: 28px 24px;
             -webkit-font-smoothing: antialiased;
             min-height: 100vh;
         }
 
         .container { max-width: 1400px; margin: 0 auto; }
 
-        /* Header Bar */
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding-bottom: 20px;
-            border-bottom: var(--border-subtle);
+        /* Call Sheet Masthead Block */
+        .masthead {
             margin-bottom: 24px;
         }
 
-        .brand h1 {
-            font-family: var(--font-display);
-            font-size: 22px;
-            font-weight: 700;
-            color: var(--text-primary);
-            letter-spacing: -0.02em;
-        }
-
-        .brand p {
-            font-size: 13px;
-            color: var(--text-tertiary);
-            margin-top: 3px;
-        }
-
-        .header-meta {
+        .masthead-main {
             display: flex;
-            align-items: center;
-            gap: 14px;
+            justify-content: space-between;
+            align-items: flex-end;
+            padding-bottom: 14px;
         }
 
-        .btn-grafana {
+        .masthead-title {
+            font-family: var(--font-condensed);
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            color: var(--text-primary);
+            line-height: 1;
+        }
+
+        .masthead-tagline {
+            font-family: var(--font-condensed);
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin-top: 5px;
+            display: block;
+        }
+
+        .masthead-link {
             display: inline-flex;
             align-items: center;
             gap: 6px;
             padding: 6px 12px;
             font-size: 11px;
             font-weight: 600;
-            font-family: var(--font-mono);
-            color: var(--accent-solid);
-            background: var(--accent-wash);
-            border: 1px solid var(--accent-line);
-            border-radius: 4px;
-            text-decoration: none;
-            transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
-        }
-
-        .btn-grafana:hover {
-            background: rgba(14, 165, 233, 0.20);
-            border-color: var(--accent-solid);
-            color: var(--text-primary);
-            text-decoration: none;
-        }
-
-        .utc-clock {
-            font-family: var(--font-mono);
-            font-size: 12px;
-            font-weight: 600;
-            font-variant-numeric: tabular-nums;
+            font-family: var(--font-condensed);
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
             color: var(--text-primary);
             background: var(--surface);
-            padding: 6px 12px;
-            border-radius: 4px;
-            border: var(--border-subtle);
+            border: 1px solid var(--rule-strong);
+            border-radius: 2px;
+            text-decoration: none;
+            transition: background 0.15s ease, border-color 0.15s ease;
         }
 
-        .status-badge {
+        .masthead-link:hover {
+            background: var(--surface-raised);
+            border-color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        /* Ruled Masthead Grid */
+        .masthead-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            border-top: 1px solid var(--rule-strong);
+            border-bottom: 1px solid var(--rule-strong);
+            margin-top: 8px;
+        }
+
+        @media (max-width: 900px) {
+            .masthead-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        .masthead-cell {
+            padding: 10px 14px;
+            border-right: 1px solid var(--rule);
             display: flex;
-            align-items: center;
-            gap: 8px;
-            font-family: var(--font-display);
-            font-size: 11px;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .masthead-cell:last-child {
+            border-right: none;
+        }
+
+        .cell-label {
+            font-family: var(--font-condensed);
+            font-size: 10.5px;
             font-weight: 600;
-            letter-spacing: 0.02em;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            padding: 6px 12px;
-            border-radius: 4px;
+            color: var(--text-dim);
         }
 
-        .badge-live {
-            background: var(--state-healthy-wash);
+        .cell-value {
+            font-family: var(--font-condensed);
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            color: var(--text-primary);
+            text-transform: uppercase;
+        }
+
+        .cell-value.mono {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .status-cell-val {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
             color: var(--state-healthy);
-            border: 1px solid var(--state-healthy-border);
         }
 
-        .badge-investigating {
-            background: var(--state-warn-wash);
-            color: var(--state-warn);
-            border: 1px solid var(--state-warn-border);
-        }
-
-        .badge-pulse {
+        .status-pip {
             width: 6px;
             height: 6px;
             border-radius: 50%;
             background: currentColor;
-            animation: pulse 2s infinite;
         }
 
-        @keyframes pulse {
-            0% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.35; transform: scale(0.85); }
-            100% { opacity: 1; transform: scale(1); }
+        /* Orienting Mission Band */
+        .orienting-band {
+            border-top: 1px solid var(--rule-strong);
+            border-bottom: 1px solid var(--rule);
+            padding: 20px 0 22px 0;
+            margin-bottom: 28px;
         }
 
-        /* Active Delivery Slate */
-        .section-title {
-            font-family: var(--font-display);
-            font-size: 12px;
+        .orienting-text {
+            font-family: var(--font-sans);
+            font-size: 14px;
+            line-height: 1.65;
+            color: var(--text-secondary);
+            max-width: 72ch;
+            text-align: left;
+            text-wrap: pretty;
+        }
+
+        .orienting-text strong {
+            color: var(--text-primary);
             font-weight: 600;
-            color: var(--text-tertiary);
-            margin-bottom: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
         }
 
+        .orienting-thesis {
+            font-family: var(--font-condensed);
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            color: var(--text-primary);
+            margin-top: 14px;
+            max-width: 74ch;
+            text-wrap: balance;
+            line-height: 1.35;
+        }
+
+        /* Ruled Section Headers */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--rule-strong);
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-family: var(--font-condensed);
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-primary);
+        }
+
+        .section-sub {
+            font-family: var(--font-condensed);
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+        }
+
+        /* Active Delivery Slate (Ruled columns) */
         .slate-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            grid-template-columns: repeat(3, 1fr);
+            border-top: 1px solid var(--rule-strong);
+            border-bottom: 1px solid var(--rule-strong);
+            margin-bottom: 32px;
+        }
+
+        @media (max-width: 960px) {
+            .slate-grid { grid-template-columns: 1fr; }
         }
 
         .slate-card {
-            background: var(--surface);
-            border: var(--border-subtle);
-            border-radius: 6px;
             padding: 16px 18px;
-            transition: border-color 0.2s ease;
+            border-right: 1px solid var(--rule);
+            background: transparent;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .slate-card:last-child {
+            border-right: none;
         }
 
         .slate-card.critical {
-            border: var(--border-strong);
-            background: linear-gradient(180deg, var(--surface) 0%, #111722 100%);
-            position: relative;
-        }
-
-        .slate-card.critical::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background: var(--accent-solid);
-            border-top-left-radius: 6px;
-            border-top-right-radius: 6px;
+            background: rgba(255, 255, 255, 0.02);
+            border-top: 2px solid var(--text-primary);
+            margin-top: -1px;
         }
 
         .slate-header {
@@ -632,167 +679,154 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             justify-content: space-between;
             align-items: flex-start;
             gap: 12px;
-            margin-bottom: 14px;
+            margin-bottom: 16px;
         }
 
         .show-title {
-            font-family: var(--font-display);
-            font-size: 15px;
-            font-weight: 600;
+            font-family: var(--font-condensed);
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
             color: var(--text-primary);
-            letter-spacing: -0.01em;
+            text-transform: uppercase;
         }
 
         .show-client {
             font-size: 12px;
-            color: var(--text-tertiary);
-            margin-top: 3px;
+            color: var(--text-dim);
+            margin-top: 2px;
         }
 
         .state-tag {
-            font-family: var(--font-mono);
+            font-family: var(--font-condensed);
             font-size: 10px;
-            font-weight: 600;
-            padding: 3px 8px;
-            border-radius: 3px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            padding: 2px 6px;
+            border-radius: 2px;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
             white-space: nowrap;
         }
 
         .tag-scheduled {
-            background: var(--state-healthy-wash);
-            color: var(--state-healthy);
-            border: 1px solid var(--state-healthy-border);
+            color: var(--text-secondary);
+            border: 1px solid var(--rule-strong);
+            background: transparent;
         }
 
         .tag-protected {
-            background: var(--state-healthy-wash);
             color: var(--state-healthy);
-            border: 1px solid var(--state-healthy);
-        }
-
-        .tag-at-risk {
-            background: var(--state-fault-wash);
-            color: var(--state-fault);
-            border: 1px solid var(--state-fault);
+            border: 1px solid var(--state-healthy-border);
+            background: var(--state-healthy-wash);
         }
 
         .slate-metrics {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-            padding-top: 12px;
-            border-top: var(--border-subtle);
+            display: flex;
+            flex-direction: column;
+            border-top: 1px solid var(--rule);
         }
 
-        .metric-row span:first-child {
-            font-size: 11px;
-            color: var(--text-tertiary);
-            text-transform: uppercase;
-            letter-spacing: 0.03em;
-            display: block;
-            margin-bottom: 2px;
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            padding: 7px 0;
+            border-bottom: 1px solid var(--rule);
         }
 
-        .metric-row span:last-child {
-            font-family: var(--font-mono);
-            font-size: 13px;
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+
+        .metric-label {
+            font-family: var(--font-condensed);
+            font-size: 10.5px;
             font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+        }
+
+        .metric-val {
+            font-family: var(--font-mono);
+            font-size: 12px;
             font-variant-numeric: tabular-nums;
             color: var(--text-primary);
         }
 
-        /* Main Workspace: Left Briefing & Audit, Right Fleet */
+        .metric-val.metric-healthy {
+            color: var(--state-healthy);
+        }
+
+        /* Main Layout: Ruled Columns */
         .main-layout {
             display: grid;
             grid-template-columns: 1.55fr 1fr;
-            gap: 20px;
+            gap: 32px;
         }
 
         @media (max-width: 1024px) {
             .main-layout { grid-template-columns: 1fr; }
         }
 
-        .card {
-            background: var(--surface);
-            border: var(--border-subtle);
-            border-radius: 6px;
-            padding: 20px;
+        /* Left: Producer Briefing in Serif */
+        .briefing-block {
+            padding-bottom: 24px;
         }
 
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-            padding-bottom: 12px;
-            border-bottom: var(--border-subtle);
-        }
-
-        .card-heading {
-            font-family: var(--font-display);
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-primary);
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-        }
-
-        /* Producer Briefing (Calm, Readable Prose) */
         .briefing-content {
-            font-family: var(--font-body);
-            font-size: 13.5px;
-            line-height: 1.65;
+            font-family: var(--font-serif);
+            font-size: 15px;
+            line-height: 1.7;
             color: var(--text-primary);
-            max-width: 72ch;
+            max-width: 70ch;
         }
 
         .briefing-content h3 {
-            font-family: var(--font-display);
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--accent-solid);
+            font-family: var(--font-condensed);
+            font-size: 12.5px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin: 18px 0 8px 0;
+            color: var(--text-primary);
+            margin: 20px 0 8px 0;
         }
 
         .briefing-content p {
-            margin-bottom: 12px;
-            color: var(--text-secondary);
+            margin-bottom: 14px;
+            color: #ded8cb;
         }
 
         .briefing-content p strong {
-            color: var(--text-primary);
+            color: #ffffff;
             font-weight: 600;
         }
 
         .briefing-content table {
             width: 100%;
             border-collapse: collapse;
-            margin: 16px 0;
+            margin: 18px 0;
             font-family: var(--font-mono);
             font-size: 12px;
             font-variant-numeric: tabular-nums;
-            border: var(--border-subtle);
-            border-radius: 4px;
-            overflow: hidden;
+            border-top: 1px solid var(--rule-strong);
+            border-bottom: 1px solid var(--rule-strong);
         }
 
         .briefing-content th, .briefing-content td {
-            padding: 8px 12px;
+            padding: 8px 10px;
             text-align: left;
-            border-bottom: var(--border-subtle);
+            border-bottom: 1px solid var(--rule);
         }
 
         .briefing-content th {
-            background: var(--surface-raised);
-            color: var(--text-primary);
-            font-weight: 600;
+            font-family: var(--font-condensed);
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
             text-transform: uppercase;
-            font-size: 11px;
-            letter-spacing: 0.04em;
+            color: var(--text-dim);
+            background: transparent;
         }
 
         .briefing-content tr:last-child td {
@@ -806,121 +840,80 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .briefing-content li {
             margin-bottom: 6px;
-            color: var(--text-secondary);
+            color: #ded8cb;
         }
 
-        /* Evidence Trail Accordion & Staggered Steps */
+        /* Evidence Chain Accordion */
         details.trail-accordion {
-            background: var(--surface-inset);
-            border: var(--border-subtle);
-            border-radius: 4px;
+            border-top: 1px solid var(--rule-strong);
+            padding-top: 16px;
             margin-top: 20px;
-            padding: 14px 18px;
         }
 
         details.trail-accordion summary {
-            font-family: var(--font-display);
+            font-family: var(--font-condensed);
             font-size: 12px;
-            font-weight: 600;
-            color: var(--accent-solid);
-            cursor: pointer;
+            font-weight: 700;
+            letter-spacing: 0.06em;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            color: var(--text-primary);
+            cursor: pointer;
             user-select: none;
         }
 
         .step-timeline {
-            margin-top: 16px;
-            border-left: 1px solid var(--border-strong);
-            padding-left: 16px;
+            margin-top: 14px;
         }
 
         .step-entry {
-            margin-bottom: 18px;
-            position: relative;
-            opacity: 0;
-            transform: translateY(6px);
-            animation: stepReveal 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-        }
-
-        .step-entry:nth-child(1) { animation-delay: 45ms; }
-        .step-entry:nth-child(2) { animation-delay: 90ms; }
-        .step-entry:nth-child(3) { animation-delay: 135ms; }
-        .step-entry:nth-child(4) { animation-delay: 180ms; }
-        .step-entry:nth-child(5) { animation-delay: 225ms; }
-        .step-entry:nth-child(6) { animation-delay: 270ms; }
-        .step-entry:nth-child(7) { animation-delay: 315ms; }
-
-        @keyframes stepReveal {
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .step-entry::before {
-            content: '';
-            position: absolute;
-            left: -21px;
-            top: 5px;
-            width: 9px;
-            height: 9px;
-            border-radius: 50%;
-            background: var(--surface-raised);
-            border: 2px solid var(--accent-solid);
+            padding: 12px 0;
+            border-bottom: 1px solid var(--rule);
         }
 
         .step-title {
-            font-family: var(--font-display);
+            font-family: var(--font-condensed);
             font-size: 13px;
-            font-weight: 600;
+            font-weight: 700;
+            letter-spacing: 0.04em;
             color: var(--text-primary);
             display: flex;
-            align-items: center;
             justify-content: space-between;
+            align-items: center;
             gap: 10px;
-            flex-wrap: wrap;
         }
 
-        /* Distinct Category Badges: Deterministic vs Generative */
-        .badge-deterministic {
-            font-family: var(--font-mono);
+        .badge-det {
+            font-family: var(--font-condensed);
             font-size: 10px;
             font-weight: 600;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.06em;
             text-transform: uppercase;
-            padding: 2px 8px;
+            padding: 2px 6px;
+            border: 1px solid var(--rule-strong);
+            color: var(--text-secondary);
+            background: transparent;
             border-radius: 2px;
-            color: #38bdf8;
-            background: rgba(56, 189, 248, 0.08);
-            border: 1px solid rgba(56, 189, 248, 0.35);
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
             white-space: nowrap;
         }
 
-        .badge-generative {
-            font-family: var(--font-body);
+        .badge-gen {
+            font-family: var(--font-condensed);
             font-size: 10px;
             font-weight: 600;
-            letter-spacing: 0.02em;
+            letter-spacing: 0.06em;
             text-transform: uppercase;
-            padding: 2px 10px;
-            border-radius: 9999px;
-            color: #c084fc;
-            background: rgba(192, 132, 252, 0.12);
-            border: 1px solid rgba(192, 132, 252, 0.40);
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
+            padding: 2px 6px;
+            border: 1px solid rgba(222, 216, 203, 0.4);
+            color: var(--text-primary);
+            background: rgba(222, 216, 203, 0.08);
+            border-radius: 2px;
             white-space: nowrap;
         }
 
         .step-desc {
             font-size: 12.5px;
-            color: var(--text-secondary);
             line-height: 1.5;
+            color: var(--text-secondary);
             margin-top: 4px;
         }
 
@@ -929,20 +922,20 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             font-size: 11px;
             font-variant-numeric: tabular-nums;
             background: var(--surface-inset);
-            border: var(--border-subtle);
-            padding: 8px 12px;
-            border-radius: 3px;
+            border: 1px solid var(--rule);
+            padding: 8px 10px;
+            border-radius: 2px;
             margin-top: 8px;
             color: var(--text-secondary);
             white-space: pre-wrap;
             word-break: break-word;
         }
 
-        /* Hero Fleet Telemetry Grid */
+        /* Fleet Telemetry Grid */
         .fleet-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 10px;
+            gap: 8px;
             position: relative;
         }
 
@@ -956,15 +949,14 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .node-tile {
             background: var(--surface);
-            border: var(--border-subtle);
-            border-radius: 4px;
-            padding: 10px 12px;
+            border: 1px solid var(--rule);
+            padding: 10px 10px;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
-            min-height: 84px;
-            transition: border-color 0.2s ease, background-color 0.2s ease;
+            min-height: 80px;
             position: relative;
+            border-radius: 2px;
         }
 
         .node-tile-header {
@@ -974,203 +966,185 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         }
 
         .node-id {
-            font-family: var(--font-mono);
-            font-size: 11px;
-            font-weight: 600;
+            font-family: var(--font-condensed);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
             color: var(--text-secondary);
-            letter-spacing: -0.01em;
         }
 
         .node-pip {
-            width: 6px;
-            height: 6px;
+            width: 5px;
+            height: 5px;
             border-radius: 50%;
             background: currentColor;
-            opacity: 0.85;
         }
 
         .node-temp {
             font-family: var(--font-mono);
-            font-size: 17px;
-            font-weight: 700;
+            font-size: 16px;
+            font-weight: 600;
             font-variant-numeric: tabular-nums;
-            margin: 4px 0 2px 0;
-            letter-spacing: -0.02em;
+            margin: 3px 0 1px 0;
         }
 
         .node-shot {
-            font-family: var(--font-mono);
-            font-size: 10px;
-            color: var(--text-tertiary);
+            font-family: var(--font-condensed);
+            font-size: 10.5px;
+            letter-spacing: 0.04em;
+            color: var(--text-dim);
+            text-transform: uppercase;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
 
-        /* Thermal State Scales */
+        /* Thermal Scales (Amber through red carries thermal scale) */
         .node-tile.node-cool {
-            background: rgba(16, 185, 129, 0.04);
-            border: 1px solid rgba(16, 185, 129, 0.20);
+            border-color: var(--rule);
         }
         .node-tile.node-cool .node-pip { color: var(--state-healthy); }
 
         .node-tile.node-nominal {
-            background: rgba(16, 185, 129, 0.08);
-            border: 1px solid rgba(16, 185, 129, 0.35);
+            border-color: var(--rule);
         }
         .node-tile.node-nominal .node-pip { color: var(--state-healthy); }
 
         .node-tile.node-warm {
-            background: rgba(245, 158, 11, 0.07);
-            border: 1px solid rgba(245, 158, 11, 0.30);
+            border-color: rgba(217, 119, 6, 0.35);
+            background: rgba(217, 119, 6, 0.05);
         }
-        .node-tile.node-warm .node-pip { color: var(--state-warn); }
+        .node-tile.node-warm .node-pip { color: var(--heat-warm); }
 
         .node-tile.node-hot {
-            background: rgba(249, 115, 22, 0.10);
-            border: 1px solid rgba(249, 115, 22, 0.40);
+            border-color: rgba(234, 88, 12, 0.45);
+            background: rgba(234, 88, 12, 0.08);
         }
-        .node-tile.node-hot .node-pip { color: #f97316; }
+        .node-tile.node-hot .node-pip { color: var(--heat-hot); }
 
         .node-tile.node-fault {
-            background: var(--state-fault-wash);
-            border: 1px solid var(--state-fault-border);
+            border-color: rgba(225, 29, 72, 0.5);
+            background: rgba(225, 29, 72, 0.10);
         }
-        .node-tile.node-fault .node-pip { color: var(--state-fault); }
+        .node-tile.node-fault .node-pip { color: var(--heat-fault); }
 
         .node-tile.node-quarantined {
-            background: var(--state-fault-wash);
-            border: 1px solid var(--state-fault-border);
-            outline: 1px dashed var(--state-fault);
+            border: 1px solid var(--heat-fault);
+            outline: 1px dashed var(--heat-fault);
             outline-offset: 2px;
+            background: rgba(225, 29, 72, 0.10);
         }
-        .node-tile.node-quarantined .node-pip { color: var(--state-fault); }
+        .node-tile.node-quarantined .node-pip { color: var(--heat-fault); }
 
         .node-tile.node-standby {
-            background: var(--surface-inset);
-            border: 1px dashed var(--state-standby-border);
-            opacity: 0.65;
+            border: 1px dashed var(--rule-strong);
+            background: transparent;
+            opacity: 0.55;
         }
-        .node-tile.node-standby .node-pip { color: var(--state-standby); }
+        .node-tile.node-standby .node-pip { color: var(--text-dim); }
 
-        /* Signature Failover Takeover Arrival Pulse */
+        /* Failover Takeover Arrival Pulse */
         .node-takeover-pulse {
             animation: takeoverPulse 1.2s ease-out;
         }
 
         @keyframes takeoverPulse {
-            0% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.7); }
-            70% { box-shadow: 0 0 0 10px rgba(14, 165, 233, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0); }
+            0% { box-shadow: 0 0 0 0 rgba(237, 233, 227, 0.5); }
+            70% { box-shadow: 0 0 0 8px rgba(237, 233, 227, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(237, 233, 227, 0); }
         }
 
-        .orienting-band {
-            background: var(--surface);
-            border: var(--border-subtle);
-            border-left: 2px solid var(--accent-solid);
-            border-radius: 6px;
-            padding: 16px 20px;
-            margin-bottom: 24px;
-        }
-
-        .orienting-text {
-            font-size: 13.5px;
-            line-height: 1.65;
-            color: var(--text-secondary);
-            max-width: 90ch;
-        }
-
-        .orienting-text strong {
-            color: var(--text-primary);
-            font-weight: 600;
-        }
-
-        .orienting-thesis {
-            font-family: var(--font-display);
-            font-size: 13.5px;
-            font-weight: 600;
-            color: var(--text-primary);
-            letter-spacing: -0.01em;
-            margin-top: 12px;
-            padding-top: 12px;
-            border-top: var(--border-subtle);
-        }
-
+        /* Footer Disclosure */
         .footer-note {
             text-align: center;
             font-size: 11px;
             font-family: var(--font-mono);
-            color: var(--text-tertiary);
-            margin-top: 36px;
-            padding-top: 16px;
-            border-top: var(--border-subtle);
+            color: var(--text-dim);
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid var(--rule);
             line-height: 1.6;
-            max-width: 860px;
+            max-width: 820px;
             margin-left: auto;
             margin-right: auto;
         }
 
-        /* Reduced Motion Fallback */
         @media (prefers-reduced-motion: reduce) {
             * {
                 animation-duration: 0.01ms !important;
                 animation-iteration-count: 1 !important;
                 transition-duration: 0.01ms !important;
             }
-            .step-entry {
-                opacity: 1 !important;
-                transform: none !important;
-                animation: none !important;
-            }
-            .badge-pulse {
-                animation: none !important;
-            }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <header>
-            <div class="brand">
-                <h1>Callsheet</h1>
-                <p>Autonomous Operations Agent for Post-Production Delivery Producers</p>
+        <!-- Production Masthead Block -->
+        <header class="masthead">
+            <div class="masthead-main">
+                <div class="masthead-brand">
+                    <h1 class="masthead-title">CALLSHEET</h1>
+                    <span class="masthead-tagline">AUTONOMOUS VFX & POST-PRODUCTION RENDER OPERATIONS</span>
+                </div>
+                <div class="masthead-meta-actions">
+                    <a href="https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd" target="_blank" rel="noopener noreferrer" class="masthead-link">
+                        GRAFANA CONTROL TOWER ↗
+                    </a>
+                </div>
             </div>
-            <div class="header-meta">
-                <a href="https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd" target="_blank" rel="noopener noreferrer" class="btn-grafana">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-                    Grafana Control Tower
-                </a>
-                <div id="utc-clock" class="utc-clock">--:--:-- UTC</div>
-                <div id="agent-status-badge" class="status-badge badge-live">
-                    <span class="badge-pulse"></span>
-                    <span id="agent-status-text">Autonomous Watch Active</span>
+
+            <div class="masthead-grid">
+                <div class="masthead-cell">
+                    <span class="cell-label">SYSTEM / UNIT</span>
+                    <span class="cell-value">POST-PRODUCTION // VFX PIPELINE</span>
+                </div>
+                <div class="masthead-cell">
+                    <span class="cell-label">CALL TIME (CLOCK)</span>
+                    <span class="cell-value mono" id="utc-clock">--:--:-- UTC</span>
+                </div>
+                <div class="masthead-cell">
+                    <span class="cell-label">INCIDENT AUDIT</span>
+                    <span class="cell-value mono" id="briefing-timestamp"><!-- SSR_BRIEFING_TIME --></span>
+                </div>
+                <div class="masthead-cell">
+                    <span class="cell-label">SUPERVISOR WATCH</span>
+                    <span class="cell-value status-cell-val" id="agent-status-text">
+                        <span class="status-pip"></span>
+                        AUTONOMOUS WATCH ACTIVE
+                    </span>
                 </div>
             </div>
         </header>
 
         <!-- Orienting Mission Band -->
-        <div class="orienting-band">
+        <section class="orienting-band">
             <p class="orienting-text">
                 Callsheet watches a post-production render farm and protects contractual delivery dates. When a node degrades, it works out which shots are at risk, moves them to spare capacity, verifies the fix in the telemetry, and reports what it did in plain language a producer can forward to a client. <strong>Everything below happened automatically. Nobody pressed anything.</strong>
             </p>
             <div class="orienting-thesis">
                 "Without Grafana, Callsheet would be a post-mortem tool that tells you why you missed the deadline after the money is already lost."
             </div>
-        </div>
+        </section>
 
-        <!-- Delivery Slate -->
-        <div class="section-title">Active Delivery Slate</div>
-        <div id="slate-container" class="slate-grid">
+        <!-- Active Delivery Slate -->
+        <section class="slate-section">
+            <div class="section-header">
+                <span class="section-title">Active Delivery Slate</span>
+                <span class="section-sub">CONTRACTUAL SCHEDULE & DEADLINE MARGINS</span>
+            </div>
+            <div id="slate-container" class="slate-grid">
 <!-- SSR_SLATE -->
-        </div>
+            </div>
+        </section>
 
         <!-- Main Workspace -->
         <div class="main-layout">
             <!-- Left: Callsheet Briefing & Audit -->
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-heading">Production Callsheet Briefing</span>
-                    <span id="briefing-timestamp" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-tertiary);"><!-- SSR_BRIEFING_TIME --></span>
+            <div class="briefing-column">
+                <div class="section-header">
+                    <span class="section-title">Production Callsheet Briefing</span>
+                    <span class="section-sub">CLIENT CORRESPONDENCE DISPATCH</span>
                 </div>
 
                 <div id="briefing-container" class="briefing-content">
@@ -1178,7 +1152,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 </div>
 
                 <details class="trail-accordion" open>
-                    <summary>Grafana Cloud MCP Evidence Trail & Telemetry Chain</summary>
+                    <summary>GRAFANA CLOUD MCP EVIDENCE TRAIL // AUDIT CHAIN</summary>
                     <div id="trail-container" class="step-timeline">
 <!-- SSR_TRAIL -->
                     </div>
@@ -1186,15 +1160,13 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             </div>
 
             <!-- Right: Fleet Hardware Grid -->
-            <div>
-                <div class="card">
-                    <div class="card-header">
-                        <span class="card-heading">Render Fleet Telemetry (12 Nodes)</span>
-                        <span id="fleet-summary" style="font-size: 11px; font-family: var(--font-mono); color: var(--text-tertiary);"><!-- SSR_FLEET_SUMMARY --></span>
-                    </div>
-                    <div id="fleet-container" class="fleet-grid">
+            <div class="fleet-column">
+                <div class="section-header">
+                    <span class="section-title">Render Fleet Telemetry</span>
+                    <span id="fleet-summary" class="section-sub"><!-- SSR_FLEET_SUMMARY --></span>
+                </div>
+                <div id="fleet-container" class="fleet-grid">
 <!-- SSR_FLEET -->
-                    </div>
                 </div>
             </div>
         </div>
@@ -1221,7 +1193,6 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 .replace(/\\*\\*(.*?)\\*\\*/gim, '<strong>$1</strong>')
                 .replace(/\\*(.*?)\\*/gim, '<em>$1</em>');
             
-            // Format tables
             if (html.includes('|')) {
                 const lines = html.split('\\n');
                 let inTable = false;
@@ -1291,13 +1262,13 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             path.setAttribute('d', pathD);
             path.setAttribute('fill', 'none');
-            path.setAttribute('stroke', 'rgba(14, 165, 233, 0.45)');
+            path.setAttribute('stroke', 'rgba(237, 233, 227, 0.35)');
             path.setAttribute('stroke-width', '1.5');
             path.setAttribute('stroke-dasharray', '4 4');
 
             const bead = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             bead.setAttribute('r', '4.5');
-            bead.setAttribute('fill', '#0ea5e9');
+            bead.setAttribute('fill', '#ede9e3');
 
             svg.appendChild(path);
             svg.appendChild(bead);
@@ -1310,7 +1281,6 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             function step(now) {
                 const elapsed = now - startTime;
                 const p = Math.min(elapsed / duration, 1.0);
-                // Cubic ease-out
                 const ease = 1 - Math.pow(1 - p, 3);
                 const pt = path.getPointAtLength(ease * pathLen);
                 bead.setAttribute('cx', pt.x);
@@ -1335,27 +1305,20 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 const res = await fetch('/api/state');
                 const data = await res.json();
 
-                // Update Agent Status Badge
-                const badge = document.getElementById('agent-status-badge');
-                const badgeText = document.getElementById('agent-status-text');
+                const statusText = document.getElementById('agent-status-text');
                 if (data.is_investigating) {
-                    badge.className = 'status-badge badge-investigating';
-                    badgeText.innerText = 'Investigating Anomaly (MCP)';
+                    statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)';
                 } else {
-                    badge.className = 'status-badge badge-live';
-                    badgeText.innerText = 'Autonomous Watch Active';
+                    statusText.innerHTML = '<span class="status-pip"></span> AUTONOMOUS WATCH ACTIVE';
                 }
 
-                // Render Delivery Slate
                 renderSlate(data.shows, data.latest_mission);
 
-                // Render Latest Mission Briefing
                 if (data.latest_mission) {
                     renderBriefing(data.latest_mission);
                     renderTrail(data.latest_mission.steps);
                 }
 
-                // Render Fleet Grid
                 renderFleet(data.nodes, data.latest_mission);
 
             } catch (err) {
@@ -1371,12 +1334,12 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             const isIntervened = latestMission && latestMission.intervention_record;
 
             container.innerHTML = showList.map(s => {
-                let statusTag = '<span class="state-tag tag-scheduled">On Schedule</span>';
+                let statusTag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>';
                 let bufferMargin = '+5.5 hours';
 
                 if (s.id === 'show-aethelgard') {
                     if (isIntervened) {
-                        statusTag = '<span class="state-tag tag-protected">Protected: Failover Applied</span>';
+                        statusTag = '<span class="state-tag tag-protected">PROTECTED</span>';
                         bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.8).toFixed(1) + ' hours';
                     } else {
                         bufferMargin = '+2.8 hours';
@@ -1409,20 +1372,20 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                         </div>
                         <div class="slate-metrics">
                             <div class="metric-row">
-                                <span>Deadline</span>
-                                <span>${deadlineFormatted}</span>
+                                <span class="metric-label">DEADLINE</span>
+                                <span class="metric-val">${deadlineFormatted}</span>
                             </div>
                             <div class="metric-row">
-                                <span>Buffer Margin</span>
-                                <span style="color: var(--state-healthy);">${bufferMargin}</span>
+                                <span class="metric-label">BUFFER MARGIN</span>
+                                <span class="metric-val metric-healthy">${bufferMargin}</span>
                             </div>
                             <div class="metric-row">
-                                <span>Daily Penalty</span>
-                                <span>£${s.penalty_daily_amount.toLocaleString()} / day</span>
+                                <span class="metric-label">DAILY PENALTY</span>
+                                <span class="metric-val">£${s.penalty_daily_amount.toLocaleString()} / day</span>
                             </div>
                             <div class="metric-row">
-                                <span>Priority Tier</span>
-                                <span>${s.critical_path ? 'Critical Path' : 'Standard'}</span>
+                                <span class="metric-label">PRIORITY TIER</span>
+                                <span class="metric-val">${s.critical_path ? 'CRITICAL PATH' : 'STANDARD'}</span>
                             </div>
                         </div>
                     </div>
@@ -1439,7 +1402,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 const utcHours = String(dateObj.getUTCHours()).padStart(2, '0');
                 const utcMinutes = String(dateObj.getUTCMinutes()).padStart(2, '0');
                 const utcSeconds = String(dateObj.getUTCSeconds()).padStart(2, '0');
-                timeLabel.innerText = `Mission logged: ${utcHours}:${utcMinutes}:${utcSeconds} UTC`;
+                timeLabel.innerText = `Mission completed: ${utcHours}:${utcMinutes}:${utcSeconds} UTC`;
             }
 
             container.innerHTML = formatMarkdown(mission.callsheet_briefing);
@@ -1448,17 +1411,9 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         function renderTrail(steps) {
             const container = document.getElementById('trail-container');
             if (!steps || !steps.length) {
-                container.innerHTML = '<div style="font-size: 12px; color: var(--text-tertiary);">No steps recorded.</div>';
+                container.innerHTML = '<div style="font-size: 12px; color: var(--text-dim);">No steps recorded.</div>';
                 return;
             }
-
-            const badges = {
-                'DETERMINISTIC_TELEMETRY': '<span class="badge-deterministic">⬡ DET: TELEMETRY</span>',
-                'DETERMINISTIC_ARITHMETIC': '<span class="badge-deterministic">⬡ DET: ARITHMETIC</span>',
-                'DETERMINISTIC_ACTION': '<span class="badge-deterministic">⬡ DET: WORKLOAD FAILOVER</span>',
-                'DETERMINISTIC_VERIFICATION': '<span class="badge-deterministic">⬡ DET: POST-AUDIT</span>',
-                'GENERATIVE_SYNTHESIS': '<span class="badge-generative">✦ GEN-AI: PRODUCER SYNTHESIS</span>',
-            };
 
             container.innerHTML = steps.map(step => {
                 let evidenceStr = '';
@@ -1466,22 +1421,19 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     evidenceStr = JSON.stringify(step.evidence, null, 2);
                 }
 
-                const execType = step.execution_type || 'DETERMINISTIC_TELEMETRY';
+                const execType = step.execution_type || 'DETERMINISTIC';
                 const stepNum = step.step_number || 1;
-                let badgeHtml = '<span class="badge-deterministic">⬡ DETERMINISTIC</span>';
+                const isGen = (stepNum === 3 || stepNum === 7 || execType === 'GENERATIVE_SYNTHESIS');
+                const badgeHtml = isGen 
+                    ? '<span class="badge-gen">GENERATIVE AI</span>' 
+                    : '<span class="badge-det">DETERMINISTIC</span>';
 
-                if (stepNum === 3) {
-                    badgeHtml = '<span class="badge-generative">✦ GEN-AI: ROOT CAUSE DEDUCTION</span>';
-                } else if (stepNum === 7) {
-                    badgeHtml = '<span class="badge-generative">✦ GEN-AI: PRODUCER BRIEFING</span>';
-                } else if (badges[execType]) {
-                    badgeHtml = badges[execType];
-                }
+                const stepName = (step.name || '').toUpperCase();
 
                 return `
                     <div class="step-entry">
                         <div class="step-title">
-                            <span>Step ${stepNum}: ${step.name}</span>
+                            <span>STEP ${stepNum}: ${stepName}</span>
                             ${badgeHtml}
                         </div>
                         <div class="step-desc">${step.description}</div>
@@ -1502,15 +1454,15 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             const standbyCount = nodeList.filter(n => n.is_standby).length;
             
             if (quarantinedCount > 0) {
-                summaryLabel.innerText = `${activeCount} Active / ${quarantinedCount} Quarantined / ${standbyCount} Standby`;
+                summaryLabel.innerText = `${activeCount} ACTIVE / ${quarantinedCount} QUARANTINED / ${standbyCount} STANDBY`;
             } else {
-                summaryLabel.innerText = `${activeCount} Active / ${standbyCount} Standby`;
+                summaryLabel.innerText = `${activeCount} ACTIVE / ${standbyCount} STANDBY`;
             }
 
             container.innerHTML = nodeList.map(n => {
                 let nodeClass = 'node-tile';
                 let tempColor = 'var(--state-healthy)';
-                let shotLabel = 'Idle';
+                let shotLabel = 'IDLE';
                 let tempVal = n.temperature_celsius;
 
                 if (n.id === 'node-07' && (n.status === 'QUARANTINED' || n.status === 'THROTTLED')) {
@@ -1521,38 +1473,38 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
                 if (n.status === 'QUARANTINED') {
                     nodeClass += ' node-quarantined';
-                    tempColor = 'var(--state-fault)';
-                    shotLabel = 'Quarantined (Fault)';
+                    tempColor = 'var(--heat-fault)';
+                    shotLabel = 'QUARANTINED (FAULT)';
                 } else if (n.is_standby) {
                     nodeClass += ' node-standby';
-                    tempColor = 'var(--text-tertiary)';
-                    shotLabel = 'Standby Spare';
+                    tempColor = 'var(--text-dim)';
+                    shotLabel = 'STANDBY SPARE';
                 } else if (n.status === 'THROTTLED' || tempVal >= 90) {
                     nodeClass += ' node-fault';
-                    tempColor = 'var(--state-fault)';
-                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Degraded (Fault)';
+                    tempColor = 'var(--heat-fault)';
+                    shotLabel = n.current_shot_id ? 'SHOT ' + n.current_shot_id.replace('sh_', '') : 'DEGRADED (FAULT)';
                 } else if (tempVal >= 78.0) {
                     nodeClass += ' node-hot';
-                    tempColor = 'var(--state-warn)';
-                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'High Load';
+                    tempColor = 'var(--heat-hot)';
+                    shotLabel = n.current_shot_id ? 'SHOT ' + n.current_shot_id.replace('sh_', '') : 'HIGH LOAD';
                 } else if (tempVal >= 68.0) {
                     nodeClass += ' node-warm';
-                    tempColor = 'var(--state-warn)';
-                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Warm Active';
+                    tempColor = 'var(--heat-warm)';
+                    shotLabel = n.current_shot_id ? 'SHOT ' + n.current_shot_id.replace('sh_', '') : 'WARM ACTIVE';
                 } else if (tempVal >= 58.0) {
                     nodeClass += ' node-nominal';
                     tempColor = 'var(--state-healthy)';
-                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Nominal';
+                    shotLabel = n.current_shot_id ? 'SHOT ' + n.current_shot_id.replace('sh_', '') : 'NOMINAL';
                 } else {
                     nodeClass += ' node-cool';
                     tempColor = 'var(--state-healthy)';
-                    shotLabel = n.current_shot_id ? 'Shot ' + n.current_shot_id.replace('sh_', '') : 'Cool Active';
+                    shotLabel = n.current_shot_id ? 'SHOT ' + n.current_shot_id.replace('sh_', '') : 'COOL ACTIVE';
                 }
 
                 return `
                     <div class="${nodeClass}" id="tile-${n.id}" data-node="${n.id}">
                         <div class="node-tile-header">
-                            <span class="node-id">${n.id}</span>
+                            <span class="node-id">${n.id.toUpperCase()}</span>
                             <span class="node-pip"></span>
                         </div>
                         <div class="node-temp" style="color: ${tempColor};">${tempVal.toFixed(1)}°C</div>
@@ -1808,9 +1760,9 @@ async def get_producer_dashboard():
                 ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             else:
                 ts_dt = timestamp
-            time_label = f"Last completed mission: {ts_dt.strftime('%H:%M:%S')} UTC"
+            time_label = f"Mission completed: {ts_dt.strftime('%H:%M:%S')} UTC"
         except Exception:
-            time_label = f"Last completed mission: {str(timestamp)[:19].replace('T', ' ')} UTC"
+            time_label = f"Mission completed: {str(timestamp)[:19].replace('T', ' ')} UTC"
     else:
         time_label = "Autonomous Watch Active"
 
