@@ -1,20 +1,23 @@
 # Callsheet
 
-When a render node degrades at 2 AM, Callsheet tells the delivery producer whether Tuesday's delivery will land on time or cost money. Most observability tools alert the engineer who built the farm; Callsheet protects the delivery producer who is accountable for the date.
+Elena Vance is the delivery producer at Cinefex Northern Pictures, an independent visual effects house in Manchester. Her team finishes shots for episodic streaming television. Right now, Elena is responsible for delivering Chronicles of Aethelgard: Episode 6 by Thursday at 16:15 UTC. If her delivery slips past the contractual deadline, Cinefex incurs an immediate financial penalty of £25,000 per day.
+
+When a render blade degrades in the middle of the night, standard monitoring alerts an infrastructure engineer with hardware temperatures and fan speeds. That engineer is rarely equipped to evaluate shot dependencies, delivery buffers, or contractual SLA penalties. I built Callsheet for Elena and the studio crews who answer for delivery commitments.
 
 Without Grafana, Callsheet would be a post-mortem tool that tells you why you missed the deadline after the money is already lost.
 
-Callsheet is an autonomous operations agent designed for the delivery producer at a boutique post-production studio (studio crews). When render nodes degrade, Callsheet connects directly to Grafana Cloud over the Model Context Protocol (MCP) to correlate metrics, logs, and traces, isolate the root cause, reallocate affected shots to protect contractual delivery deadlines, and explain the situation in plain production language.
+Callsheet monitors render operations through Grafana Cloud over the Model Context Protocol (MCP). When hardware degradation threatens an episode delivery, Callsheet acts autonomously. It calculates the delivery margin deficit, isolates the throttled node, reallocates the at-risk shot to an idle standby blade, and interrogates the target node's live telemetry to confirm that render throughput recovered. It then writes a plain-language production briefing that Elena can forward directly to her client.
 
-## Who This Is For
+## Live Deployment & Dashboards
 
-This project serves one person: the delivery producer at a post-production house with thirty to sixty staff and a dozen render nodes. She manages multiple shows with hard contractual delivery dates and financial penalty clauses. She is accountable for the schedule and needs actionable production impact briefings rather than raw infrastructure metrics.
+- Production Application: [https://callsheet-746874807798.us-central1.run.app](https://callsheet-746874807798.us-central1.run.app)
+- Public Grafana Control Tower: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd)
 
 ## Architecture
 
 ```
 [ Synthetic Render Farm ]
-          │ (OTel: Metrics, Logs, Traces via single OTLP endpoint)
+          │ (OTel: Prometheus Metrics, Loki Logs, Tempo Traces via OTLP)
           ▼
    [ Grafana Cloud ]
           │
@@ -24,45 +27,80 @@ This project serves one person: the delivery producer at a post-production house
           │
           │ (Model Context Protocol)
           ▼
- [ Callsheet Operations Agent (ADK + Vertex AI Gemini) ]
+ [ Callsheet Operations Agent (Python + Vertex AI Gemini) ]
           │
-          ├─► 1. Anomaly Detection (Prometheus)                   [DETERMINISTIC TELEMETRY]
-          ├─► 2. Correlation (Loki Logs & Tempo Traces)           [DETERMINISTIC TELEMETRY]
-          ├─► 3. Root Cause Isolation (Gemini 3.6 Flash)          [GENERATIVE AI]
-          ├─► 4. Production Impact Mapping                        [DETERMINISTIC ARITHMETIC]
-          ├─► 5. Automated Job Reallocation                       [DETERMINISTIC ACTION]
-          ├─► 6. Post-Intervention Verification (Grafana Cloud)   [DETERMINISTIC VERIFICATION]
-          └─► 7. Producer Callsheet Briefing (Gemini 3.6 Flash)   [GENERATIVE AI]
+          ├─► Step 1: Anomaly Detection (Prometheus)                 [DETERMINISTIC TELEMETRY]
+          ├─► Step 2: Correlation (Loki Logs & Tempo Traces)         [DETERMINISTIC TELEMETRY]
+          ├─► Step 3: Root Cause Isolation (Gemini 2.5 Flash)        [GENERATIVE AI]
+          ├─► Step 4: Production Impact Mapping                      [DETERMINISTIC ARITHMETIC]
+          ├─► Step 5: Autonomous Workload Reallocation               [DETERMINISTIC ACTION]
+          ├─► Step 6: Post-Intervention Verification (Grafana Cloud) [DETERMINISTIC VERIFICATION]
+          └─► Step 7: Producer Callsheet Briefing (Gemini 2.5 Flash) [GENERATIVE AI]
 ```
 
-## Deterministic Remediation vs. Generative Explanation
+## Deterministic Action vs. Generative Explanation
 
-A core architectural invariant of Callsheet is the strict separation between deterministic remediation and generative language explanation:
+A non-negotiable architectural principle in Callsheet is the boundary between deterministic operational decisions and generative language synthesis:
 
-- **Gemini cannot trigger, alter, or override any operational verdict.**
-- **Remediation is purely deterministic**: Hardware threshold breaches (Step 1) and delivery buffer deficits (Step 4) are evaluated strictly with pure mathematical arithmetic. The workload failover intervention (Step 5) is executed only when code assertions confirm a negative buffer margin and hardware thermal breach.
-- **Verification closes the loop**: Unlike systems that propose actions or assume success upon command execution, Step 6 re-queries Grafana Cloud telemetry on the standby node to independently verify nominal frame render rates (20s) and junction temperatures (<70°C). If metrics remain degraded, the agent disallows the `PROTECTED` status, records the verified failure, and escalates to human technical directors.
-- **Generative AI is explanatory only**: Vertex AI Gemini 3.6 Flash is employed exclusively for explanatory synthesis (Step 3 Root Cause Deduction and Step 7 Producer Callsheet Briefings), translating raw correlated telemetry into actionable commercial language for delivery producers.
+- Generative models cannot trigger, alter, or approve any operational intervention.
+- Interventions are 100% deterministic: Thermal limits (Step 1) and delivery buffer calculations (Step 4) are evaluated purely with mathematical arithmetic in Python. The workload failover (Step 5) is executed only when code assertions confirm a negative buffer margin and a thermal limit breach.
+- Verification closes the loop: Unlike competing tools that merely propose recommendations or assume success upon executing a command, Step 6 re-queries Grafana Cloud telemetry on the standby blade to independently verify nominal frame durations (20 seconds per frame) and stable junction temperatures. If metrics remain degraded, Callsheet rejects the `PROTECTED` status, records the verified fault, and escalates directly to human technical directors.
+- Generative AI is strictly explanatory: Vertex AI Gemini is employed exclusively for qualitative synthesis: Step 3 (deducing root causes from correlated logs and traces) and Step 7 (drafting plain-language correspondence briefings for delivery producers).
 
 ## Decision Path Integrity and the Rip-Out Test
 
 Callsheet enforces strict telemetry boundary isolation across its entire decision path:
 
-- **No number reaches a decision without a round trip through Grafana Cloud**: The Callsheet agent never reads the simulator's internal memory or local state. Every metric sample, log record, and trace duration that drives an intervention decision is retrieved dynamically from Grafana Cloud over the Model Context Protocol (MCP).
-- **The Rip-Out Test**: The evidence of this isolation is that pointing the mission at an offline, unconfigured, or unreachable Grafana instance causes the mission to fail immediately and outright. There are no silent fallbacks, in-memory cheats, or mocked data side-channels.
-- **What the Farm Is**: The synthetic farm is an operational simulator that emits genuine OpenTelemetry metrics (Prometheus), structured logs (Loki), and distributed trace spans (Tempo) to a real Grafana Cloud stack via an OTLP gateway. The agent queries that telemetry back through MCP exactly as it would against physical on-premise blade servers, AWS Deadline nodes, or Pixar Tractor workers.
-- **Transition to Physical Infrastructure**: To point Callsheet at physical studio infrastructure, only the telemetry emitter changes. The agent, reasoning loop, MCP tools, arithmetic gates, and briefing pipelines remain 100% identical.
-- **Simulator Baseline Render Rate**: The baseline render rate (20.0 seconds per frame) is an explicit stated parameter of the simulator representing nominal throughput, rather than a wall-clock measurement subject to vCPU jitter. Downstream contractual buffer arithmetic is derived deterministically from this stated baseline.
+- No number reaches a decision without a round trip through Grafana Cloud: The Callsheet agent never reads the simulator's internal memory or local state. Every metric sample, log record, and trace duration that drives an intervention decision is retrieved dynamically from Grafana Cloud over the Model Context Protocol.
+- The Rip-Out Test: The proof of this isolation is that pointing Callsheet at an unreachable or severed Grafana endpoint causes the mission to fail immediately. The agent contains no mock fallbacks, local memory shortcuts, or side-channel cheats. This failure invariant is asserted in the automated test suite: `tests/test_agent_mission.py::test_mission_fails_when_grafana_unreachable`.
+- What the Farm Is: The render farm is an operational simulator that emits genuine OpenTelemetry metrics (Prometheus), structured logs (Loki), and distributed trace spans (Tempo) to Grafana Cloud via an OTLP gateway. The agent queries that telemetry back through MCP exactly as it would against physical on-premise blade servers, AWS Deadline nodes, or Pixar Tractor workers.
+- Transition to Physical Infrastructure: To connect Callsheet to physical studio hardware, only the telemetry emitter changes. The agent reasoning loop, MCP tool bindings, deterministic gates, and briefing pipelines remain identical.
+- Stated Baseline Render Rate: The baseline render rate (20.0 seconds per frame) is an explicit stated parameter of the simulator representing nominal throughput, rather than a wall-clock measurement subject to vCPU jitter. Downstream contractual buffer arithmetic is derived deterministically from this stated baseline.
 
-## Live Observability & Grafana Control Tower
+## Local Setup and Verification
 
-A dedicated Grafana Cloud dashboard provides real-time visibility into the render farm's node temperatures, worker frame durations, and active render queue:
-- **Control Tower Dashboard**: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd)
+### Prerequisites
+- Python 3.12 or higher
+- Git
+- Google Cloud project with Vertex AI enabled
+- Grafana Cloud stack with Prometheus, Loki, and Tempo access
 
-## Technologies Used
+### Installation
+```bash
+git clone https://github.com/iamrobertmoore/callsheet.git
+cd callsheet
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
 
-- **Google Cloud AI**: Google Agent Development Kit (`google-adk`), Vertex AI Gemini (`google-genai`, `google-cloud-aiplatform`), Cloud Run, and Cloud Build.
-- **Grafana Stack**: Grafana Cloud, `grafana/mcp-grafana` MCP Server, Prometheus metrics, Loki logs, and OpenTelemetry ingestion (Tempo traces).
+### Environment Configuration
+Create a `.env` file in the repository root:
+```env
+GRAFANA_URL=https://<your-instance>.grafana.net
+GRAFANA_SERVICE_ACCOUNT_TOKEN=<your-token>
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-<region>.grafana.net/otlp
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64-credentials>
+GOOGLE_CLOUD_PROJECT=<your-project-id>
+GOOGLE_CLOUD_LOCATION=global
+```
+
+### Running Tests
+Execute the test suite to verify the simulation, MCP round trip, and failover mechanics:
+```bash
+pytest -v
+```
+
+To run the rip-out test confirming that decisions depend entirely on Grafana Cloud:
+```bash
+pytest tests/test_agent_mission.py::test_mission_fails_when_grafana_unreachable -v
+```
+
+### Running the Web Application
+```bash
+./scripts/start_server.sh
+```
+Open `http://localhost:8080` in your browser to view the active Call Sheet dashboard, or visit `/demo` to inject scenarios on demand.
 
 ## License
 
