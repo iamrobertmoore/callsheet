@@ -419,26 +419,26 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             --surface-inset: #0c0c0b;
 
             /* Hairlines in Two Weights (Paperwork Rules) */
-            --rule: rgba(235, 230, 220, 0.10);
-            --rule-strong: rgba(235, 230, 220, 0.22);
+            --rule: rgba(235, 230, 220, 0.12);
+            --rule-strong: rgba(235, 230, 220, 0.24);
 
-            /* Text Tints: Bone, Warm Stone, Graphite Dim */
-            --text-primary: #ede9e3;
-            --text-secondary: #9c978e;
-            --text-dim: #66635d;
+            /* Lifted Text Tints: High Contrast bone, warm stone, and legible grey (all >= 4.5:1, prose >= 7:1) */
+            --text-primary: #f5f2ec;
+            --text-secondary: #d0cbc2;
+            --text-dim: #b0aaa0;
 
             /* Sparing Neutral Accent: Studio Titanium / Bone */
             --accent: #ded8cb;
 
             /* Semantic Healthy / Protected: Low Saturation Sage */
-            --state-healthy: #62a884;
-            --state-healthy-wash: rgba(98, 168, 132, 0.08);
-            --state-healthy-border: rgba(98, 168, 132, 0.28);
+            --state-healthy: #76c79b;
+            --state-healthy-wash: rgba(118, 199, 155, 0.09);
+            --state-healthy-border: rgba(118, 199, 155, 0.35);
 
             /* Thermal Scale (Strictly Reserved for Heat on the Fleet Grid) */
-            --heat-warm: #d97706;
-            --heat-hot: #ea580c;
-            --heat-fault: #e11d48;
+            --heat-warm: #f59e0b;
+            --heat-hot: #fb923c;
+            --heat-fault: #f87171;
 
             /* Typography */
             --font-condensed: 'Barlow Condensed', 'Archivo Narrow', -apple-system, sans-serif;
@@ -452,6 +452,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             background-color: var(--bg);
             color: var(--text-secondary);
             font-family: var(--font-sans);
+            font-size: 17px;
+            line-height: 1.6;
             padding: 28px 24px;
             -webkit-font-smoothing: antialiased;
             min-height: 100vh;
@@ -473,16 +475,17 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .masthead-title {
             font-family: var(--font-condensed);
-            font-size: 32px;
+            font-size: 36px;
+            line-height: 1.2;
             font-weight: 700;
             letter-spacing: 0.06em;
             color: var(--text-primary);
-            line-height: 1;
         }
 
         .masthead-tagline {
             font-family: var(--font-condensed);
             font-size: 12px;
+            line-height: 1.3;
             font-weight: 600;
             letter-spacing: 0.08em;
             text-transform: uppercase;
@@ -496,10 +499,11 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             align-items: center;
             gap: 6px;
             padding: 6px 12px;
-            font-size: 11px;
-            font-weight: 600;
+            font-size: 12px;
+            line-height: 1.3;
+            font-weight: 700;
             font-family: var(--font-condensed);
-            letter-spacing: 0.06em;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
             color: var(--text-primary);
             background: var(--surface);
@@ -542,7 +546,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .cell-label {
             font-family: var(--font-condensed);
-            font-size: 10.5px;
+            font-size: 12px;
+            line-height: 1.3;
             font-weight: 600;
             letter-spacing: 0.08em;
             text-transform: uppercase;
@@ -551,7 +556,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .cell-value {
             font-family: var(--font-condensed);
-            font-size: 13px;
+            font-size: 16px;
+            line-height: 1.3;
             font-weight: 600;
             letter-spacing: 0.04em;
             color: var(--text-primary);
@@ -560,7 +566,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .cell-value.mono {
             font-family: var(--font-mono);
-            font-size: 12px;
+            font-size: 16px;
+            line-height: 1.3;
             font-variant-numeric: tabular-nums;
         }
 
@@ -582,36 +589,18 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         .orienting-band {
             border-top: 1px solid var(--rule-strong);
             border-bottom: 1px solid var(--rule);
-            padding: 20px 0 22px 0;
+            padding: 16px 0;
             margin-bottom: 28px;
         }
 
         .orienting-text {
             font-family: var(--font-sans);
-            font-size: 14px;
-            line-height: 1.65;
+            font-size: 17px;
+            line-height: 1.6;
             color: var(--text-secondary);
             max-width: 72ch;
             text-align: left;
             text-wrap: pretty;
-        }
-
-        .orienting-text strong {
-            color: var(--text-primary);
-            font-weight: 600;
-        }
-
-        .orienting-thesis {
-            font-family: var(--font-condensed);
-            font-size: 16px;
-            font-weight: 700;
-            letter-spacing: 0.02em;
-            text-transform: uppercase;
-            color: var(--text-primary);
-            margin-top: 14px;
-            max-width: 74ch;
-            text-wrap: balance;
-            line-height: 1.35;
         }
 
         /* Ruled Section Headers */
@@ -626,17 +615,19 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .section-title {
             font-family: var(--font-condensed);
-            font-size: 13px;
+            font-size: 20px;
+            line-height: 1.2;
             font-weight: 700;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.04em;
             text-transform: uppercase;
             color: var(--text-primary);
         }
 
         .section-sub {
             font-family: var(--font-condensed);
-            font-size: 11px;
-            font-weight: 500;
+            font-size: 12px;
+            line-height: 1.3;
+            font-weight: 600;
             letter-spacing: 0.06em;
             text-transform: uppercase;
             color: var(--text-dim);
@@ -656,7 +647,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         }
 
         .slate-card {
-            padding: 16px 18px;
+            padding: 18px 20px;
             border-right: 1px solid var(--rule);
             background: transparent;
             display: flex;
@@ -684,7 +675,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .show-title {
             font-family: var(--font-condensed);
-            font-size: 17px;
+            font-size: 24px;
+            line-height: 1.2;
             font-weight: 700;
             letter-spacing: 0.02em;
             color: var(--text-primary);
@@ -693,16 +685,18 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .show-client {
             font-size: 12px;
+            line-height: 1.3;
             color: var(--text-dim);
-            margin-top: 2px;
+            margin-top: 3px;
         }
 
         .state-tag {
             font-family: var(--font-condensed);
-            font-size: 10px;
+            font-size: 12px;
+            line-height: 1.3;
             font-weight: 700;
-            letter-spacing: 0.06em;
-            padding: 2px 6px;
+            letter-spacing: 0.08em;
+            padding: 3px 8px;
             border-radius: 2px;
             text-transform: uppercase;
             white-space: nowrap;
@@ -730,7 +724,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             display: flex;
             justify-content: space-between;
             align-items: baseline;
-            padding: 7px 0;
+            padding: 8px 0;
             border-bottom: 1px solid var(--rule);
         }
 
@@ -740,7 +734,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .metric-label {
             font-family: var(--font-condensed);
-            font-size: 10.5px;
+            font-size: 12px;
+            line-height: 1.3;
             font-weight: 600;
             letter-spacing: 0.06em;
             text-transform: uppercase;
@@ -749,7 +744,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .metric-val {
             font-family: var(--font-mono);
-            font-size: 12px;
+            font-size: 16px;
+            line-height: 1.3;
             font-variant-numeric: tabular-nums;
             color: var(--text-primary);
         }
@@ -776,25 +772,28 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .briefing-content {
             font-family: var(--font-serif);
-            font-size: 15px;
-            line-height: 1.7;
+            font-size: 17px;
+            line-height: 1.6;
             color: var(--text-primary);
             max-width: 70ch;
         }
 
         .briefing-content h3 {
             font-family: var(--font-condensed);
-            font-size: 12.5px;
+            font-size: 20px;
+            line-height: 1.2;
             font-weight: 700;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.04em;
             text-transform: uppercase;
             color: var(--text-primary);
-            margin: 20px 0 8px 0;
+            margin: 24px 0 10px 0;
         }
 
         .briefing-content p {
-            margin-bottom: 14px;
-            color: #ded8cb;
+            font-size: 17px;
+            line-height: 1.6;
+            margin-bottom: 16px;
+            color: var(--text-primary);
         }
 
         .briefing-content p strong {
@@ -807,7 +806,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             border-collapse: collapse;
             margin: 18px 0;
             font-family: var(--font-mono);
-            font-size: 12px;
+            font-size: 16px;
+            line-height: 1.4;
             font-variant-numeric: tabular-nums;
             border-top: 1px solid var(--rule-strong);
             border-bottom: 1px solid var(--rule-strong);
@@ -821,12 +821,19 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .briefing-content th {
             font-family: var(--font-condensed);
-            font-size: 10.5px;
+            font-size: 12px;
+            line-height: 1.3;
             font-weight: 700;
             letter-spacing: 0.06em;
             text-transform: uppercase;
             color: var(--text-dim);
             background: transparent;
+        }
+
+        .briefing-content td {
+            font-size: 16px;
+            line-height: 1.4;
+            color: var(--text-primary);
         }
 
         .briefing-content tr:last-child td {
@@ -835,26 +842,29 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .briefing-content ul {
             padding-left: 20px;
-            margin-bottom: 14px;
+            margin-bottom: 16px;
         }
 
         .briefing-content li {
-            margin-bottom: 6px;
-            color: #ded8cb;
+            font-size: 17px;
+            line-height: 1.6;
+            margin-bottom: 8px;
+            color: var(--text-primary);
         }
 
         /* Evidence Chain Accordion */
         details.trail-accordion {
             border-top: 1px solid var(--rule-strong);
             padding-top: 16px;
-            margin-top: 20px;
+            margin-top: 24px;
         }
 
         details.trail-accordion summary {
             font-family: var(--font-condensed);
-            font-size: 12px;
+            font-size: 20px;
+            line-height: 1.2;
             font-weight: 700;
-            letter-spacing: 0.06em;
+            letter-spacing: 0.04em;
             text-transform: uppercase;
             color: var(--text-primary);
             cursor: pointer;
@@ -862,17 +872,18 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         }
 
         .step-timeline {
-            margin-top: 14px;
+            margin-top: 16px;
         }
 
         .step-entry {
-            padding: 12px 0;
+            padding: 14px 0;
             border-bottom: 1px solid var(--rule);
         }
 
         .step-title {
             font-family: var(--font-condensed);
-            font-size: 13px;
+            font-size: 16px;
+            line-height: 1.3;
             font-weight: 700;
             letter-spacing: 0.04em;
             color: var(--text-primary);
@@ -884,11 +895,12 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .badge-det {
             font-family: var(--font-condensed);
-            font-size: 10px;
-            font-weight: 600;
-            letter-spacing: 0.06em;
+            font-size: 12px;
+            line-height: 1.3;
+            font-weight: 700;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            padding: 2px 6px;
+            padding: 3px 8px;
             border: 1px solid var(--rule-strong);
             color: var(--text-secondary);
             background: transparent;
@@ -898,11 +910,12 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
         .badge-gen {
             font-family: var(--font-condensed);
-            font-size: 10px;
-            font-weight: 600;
-            letter-spacing: 0.06em;
+            font-size: 12px;
+            line-height: 1.3;
+            font-weight: 700;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            padding: 2px 6px;
+            padding: 3px 8px;
             border: 1px solid rgba(222, 216, 203, 0.4);
             color: var(--text-primary);
             background: rgba(222, 216, 203, 0.08);
@@ -911,21 +924,22 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         }
 
         .step-desc {
-            font-size: 12.5px;
-            line-height: 1.5;
+            font-size: 17px;
+            line-height: 1.6;
             color: var(--text-secondary);
-            margin-top: 4px;
+            margin-top: 6px;
         }
 
         .step-evidence {
             font-family: var(--font-mono);
-            font-size: 11px;
+            font-size: 16px;
+            line-height: 1.4;
             font-variant-numeric: tabular-nums;
             background: var(--surface-inset);
             border: 1px solid var(--rule);
-            padding: 8px 10px;
+            padding: 10px 12px;
             border-radius: 2px;
-            margin-top: 8px;
+            margin-top: 10px;
             color: var(--text-secondary);
             white-space: pre-wrap;
             word-break: break-word;
@@ -968,14 +982,15 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         .node-id {
             font-family: var(--font-condensed);
             font-size: 12px;
+            line-height: 1.3;
             font-weight: 700;
             letter-spacing: 0.04em;
             color: var(--text-secondary);
         }
 
         .node-pip {
-            width: 5px;
-            height: 5px;
+            width: 6px;
+            height: 6px;
             border-radius: 50%;
             background: currentColor;
         }
@@ -983,14 +998,16 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         .node-temp {
             font-family: var(--font-mono);
             font-size: 16px;
+            line-height: 1.3;
             font-weight: 600;
             font-variant-numeric: tabular-nums;
-            margin: 3px 0 1px 0;
+            margin: 4px 0 2px 0;
         }
 
         .node-shot {
             font-family: var(--font-condensed);
-            font-size: 10.5px;
+            font-size: 12px;
+            line-height: 1.3;
             letter-spacing: 0.04em;
             color: var(--text-dim);
             text-transform: uppercase;
@@ -1011,20 +1028,20 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         .node-tile.node-nominal .node-pip { color: var(--state-healthy); }
 
         .node-tile.node-warm {
-            border-color: rgba(217, 119, 6, 0.35);
-            background: rgba(217, 119, 6, 0.05);
+            border-color: rgba(245, 158, 11, 0.40);
+            background: rgba(245, 158, 11, 0.06);
         }
         .node-tile.node-warm .node-pip { color: var(--heat-warm); }
 
         .node-tile.node-hot {
-            border-color: rgba(234, 88, 12, 0.45);
-            background: rgba(234, 88, 12, 0.08);
+            border-color: rgba(251, 146, 60, 0.50);
+            background: rgba(251, 146, 60, 0.08);
         }
         .node-tile.node-hot .node-pip { color: var(--heat-hot); }
 
         .node-tile.node-fault {
-            border-color: rgba(225, 29, 72, 0.5);
-            background: rgba(225, 29, 72, 0.10);
+            border-color: rgba(248, 113, 113, 0.55);
+            background: rgba(248, 113, 113, 0.10);
         }
         .node-tile.node-fault .node-pip { color: var(--heat-fault); }
 
@@ -1032,14 +1049,14 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             border: 1px solid var(--heat-fault);
             outline: 1px dashed var(--heat-fault);
             outline-offset: 2px;
-            background: rgba(225, 29, 72, 0.10);
+            background: rgba(248, 113, 113, 0.10);
         }
         .node-tile.node-quarantined .node-pip { color: var(--heat-fault); }
 
         .node-tile.node-standby {
             border: 1px dashed var(--rule-strong);
             background: transparent;
-            opacity: 0.55;
+            opacity: 0.65;
         }
         .node-tile.node-standby .node-pip { color: var(--text-dim); }
 
@@ -1057,13 +1074,13 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         /* Footer Disclosure */
         .footer-note {
             text-align: center;
-            font-size: 11px;
+            font-size: 12px;
+            line-height: 1.6;
             font-family: var(--font-mono);
             color: var(--text-dim);
             margin-top: 40px;
             padding-top: 20px;
             border-top: 1px solid var(--rule);
-            line-height: 1.6;
             max-width: 820px;
             margin-left: auto;
             margin-right: auto;
@@ -1120,11 +1137,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
         <!-- Orienting Mission Band -->
         <section class="orienting-band">
             <p class="orienting-text">
-                Callsheet watches a post-production render farm and protects contractual delivery dates. When a node degrades, it works out which shots are at risk, moves them to spare capacity, verifies the fix in the telemetry, and reports what it did in plain language a producer can forward to a client. <strong>Everything below happened automatically. Nobody pressed anything.</strong>
+                Callsheet watches a post-production render farm and protects contractual delivery dates. When a node degrades, it works out which shots are at risk, moves them to spare capacity, verifies the fix in the telemetry, and reports what it did in plain language a producer can forward to a client.
             </p>
-            <div class="orienting-thesis">
-                "Without Grafana, Callsheet would be a post-mortem tool that tells you why you missed the deadline after the money is already lost."
-            </div>
         </section>
 
         <!-- Active Delivery Slate -->
