@@ -101,10 +101,13 @@ class FarmWorker:
         self.cycle_interval_seconds = cycle_interval_seconds
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._mission_task: Optional[asyncio.Task] = None
         self.latest_mission: Dict[str, Any] = get_default_healthy_briefing()
         self.is_investigating = False
         self._last_investigated_node: Optional[str] = None
         self._last_cycle_epoch: Optional[int] = None
+        self.tick_cadence_history: List[Dict[str, Any]] = []
+        self._last_tick_start: Optional[float] = None
 
     @property
     def verification_progress(self) -> Optional[Dict[str, Any]]:
@@ -112,6 +115,23 @@ class FarmWorker:
         if self.mission_runner:
             return getattr(self.mission_runner, "verification_progress", None)
         return None
+
+    @property
+    def tick_cadence_stats(self) -> Dict[str, Any]:
+        """Returns statistics on simulation tick cadence and execution latency."""
+        if not self.tick_cadence_history:
+            return {"status": "no_ticks_recorded"}
+        durations = [h["duration_seconds"] for h in self.tick_cadence_history]
+        intervals = [h["interval_seconds"] for h in self.tick_cadence_history if h.get("interval_seconds") is not None]
+        return {
+            "total_recorded_ticks": len(self.tick_cadence_history),
+            "last_interval_seconds": intervals[-1] if intervals else None,
+            "average_interval_seconds": round(sum(intervals) / len(intervals), 2) if intervals else None,
+            "last_duration_seconds": durations[-1] if durations else None,
+            "average_duration_seconds": round(sum(durations) / len(durations), 2) if durations else None,
+            "is_investigating": self.is_investigating,
+            "recent_ticks": self.tick_cadence_history[-5:],
+        }
 
     async def start(self) -> None:
         """Starts the continuous emission and autonomous watchdog loop."""
@@ -131,10 +151,21 @@ class FarmWorker:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._mission_task and not self._mission_task.done():
+            self._mission_task.cancel()
+            try:
+                await self._mission_task
+            except asyncio.CancelledError:
+                pass
+            self._mission_task = None
         logger.info("Farm continuous worker stopped.")
 
     async def _run_loop(self) -> None:
         while self._running:
+            t_start = time.time()
+            interval = (t_start - self._last_tick_start) if self._last_tick_start is not None else None
+            self._last_tick_start = t_start
+
             try:
                 now_ts = int(time.time())
                 current_epoch = int(now_ts // self.cycle_interval_seconds)
@@ -166,6 +197,25 @@ class FarmWorker:
             except Exception as e:
                 logger.error("Error during farm worker tick: %s", e, exc_info=True)
 
+            t_end = time.time()
+            duration = t_end - t_start
+            cadence_entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "interval_seconds": round(interval, 2) if interval is not None else None,
+                "duration_seconds": round(duration, 2),
+                "is_investigating": self.is_investigating,
+            }
+            self.tick_cadence_history.append(cadence_entry)
+            if len(self.tick_cadence_history) > 50:
+                self.tick_cadence_history.pop(0)
+
+            logger.info(
+                "Worker tick completed in %.2fs (interval: %s, investigating: %s)",
+                duration,
+                f"{interval:.2f}s" if interval is not None else "initial",
+                self.is_investigating,
+            )
+
             await asyncio.sleep(self.tick_interval_seconds)
 
     async def _check_and_trigger_autonomous_mission(self) -> None:
@@ -193,7 +243,7 @@ class FarmWorker:
                 )
                 self.is_investigating = True
                 self._last_investigated_node = target_node.id
-                asyncio.create_task(self._run_autonomous_mission(target_node.id))
+                self._mission_task = asyncio.create_task(self._run_autonomous_mission(target_node.id))
 
     async def _run_autonomous_mission(self, target_node_id: str) -> None:
         try:
@@ -207,6 +257,7 @@ class FarmWorker:
             logger.error("Autonomous mission execution failed: %s", ex, exc_info=True)
         finally:
             self.is_investigating = False
+            self._mission_task = None
 
     def inject_scenario(self, scenario: ScenarioType) -> None:
         """Injects a scenario into the running simulator (used by /demo or filming)."""

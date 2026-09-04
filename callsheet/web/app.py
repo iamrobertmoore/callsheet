@@ -26,7 +26,7 @@ mission_runner = MultiStepMissionRunner(
     dispatcher=dispatcher,
     project_id=os.getenv("GOOGLE_CLOUD_PROJECT", "agent-attest-2026"),
     location=os.getenv("VERTEX_AI_LOCATION", "global"),
-    model_name="gemini-3.6-flash",
+    model_name="gemini-3.8-flash",
 )
 worker = FarmWorker(
     simulator=simulator,
@@ -93,6 +93,7 @@ async def get_farm_state():
         "is_investigating": worker.is_investigating,
         "interventions_count": len(dispatcher.history),
         "verification_progress": worker.verification_progress,
+        "tick_cadence": worker.tick_cadence_stats,
     }
     return JSONResponse(
         content=content,

@@ -58,7 +58,7 @@ async def test_full_six_step_mission_against_live_grafana():
     emitter.tracer_provider.force_flush()
 
     # Wait briefly for Grafana Cloud indexing
-    time.sleep(5)
+    time.sleep(8)
 
     dispatcher = InterventionDispatcher(sim)
 
@@ -95,7 +95,7 @@ async def test_full_six_step_mission_against_live_grafana():
             mcp_server_url=server_url,
             project_id="agent-attest-2026",
             location="global",
-            model_name="gemini-3.6-flash",
+            model_name="gemini-3.8-flash",
         )
 
         async def bg_ticker():
@@ -189,7 +189,7 @@ async def test_post_intervention_verification_escalation_path():
     emitter.logger_provider.force_flush()
     emitter.tracer_provider.force_flush()
 
-    time.sleep(4)
+    time.sleep(8)
 
     dispatcher = InterventionDispatcher(sim)
 
@@ -220,7 +220,7 @@ async def test_post_intervention_verification_escalation_path():
             mcp_server_url=server_url,
             project_id="agent-attest-2026",
             location="global",
-            model_name="gemini-3.6-flash",
+            model_name="gemini-3.8-flash",
         )
 
         # Force verification fault
@@ -228,7 +228,7 @@ async def test_post_intervention_verification_escalation_path():
             try:
                 while True:
                     await asyncio.sleep(3.0)
-                    events = sim.tick(delta_seconds=3.0)
+                    events = sim.tick(delta_seconds=6.0)
                     emitter.emit_metrics_tick()
                     if events:
                         emitter.process_events(events)
@@ -281,7 +281,7 @@ async def test_mission_fails_when_grafana_unreachable():
         mcp_server_url=dead_server_url,
         project_id="agent-attest-2026",
         location="global",
-        model_name="gemini-3.6-flash",
+        model_name="gemini-3.8-flash",
     )
 
     with pytest.raises((ConnectionError, RuntimeError)) as excinfo:

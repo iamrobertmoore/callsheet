@@ -21,6 +21,7 @@ from callsheet.agent.prompts import (
     CALLSHEET_AGENT_SYSTEM_PROMPT,
     CALLSHEET_SUMMARY_PROMPT_TEMPLATE,
 )
+from callsheet.farm.emitter import get_deployment_id
 from callsheet.farm.models import NodeStatus
 from callsheet.interventions.dispatcher import (
     InterventionDispatcher,
@@ -45,7 +46,7 @@ class MissionStep(BaseModel):
 
 
 class MissionResult(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    id: str = Field(default_factory=lambda: f"mission_{uuid.uuid4().hex[:8]}")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     show_id: str
     show_name: str
@@ -56,10 +57,10 @@ class MissionResult(BaseModel):
     anomaly_detected: str
     root_cause: str
     affected_shots: List[str]
-    intervention_record: Optional[InterventionRecord] = None
-    verification_status: str = "VERIFIED_PROTECTED"
-    steps: List[MissionStep] = Field(default_factory=list)
-    callsheet_briefing: str = ""
+    intervention_record: InterventionRecord
+    verification_status: str
+    steps: List[MissionStep]
+    callsheet_briefing: str
 
 
 def parse_loki_timestamp(ts_raw: Any) -> Optional[float]:
@@ -114,13 +115,15 @@ class MultiStepMissionRunner:
         mcp_server_url: Optional[str] = None,
         project_id: str = "agent-attest-2026",
         location: str = "global",
-        model_name: str = "gemini-3.6-flash",
+        model_name: str = "gemini-3.8-flash",
+        deployment_id: Optional[str] = None,
     ):
         self.dispatcher = dispatcher
         self.mcp_server_url = mcp_server_url
         self.project_id = project_id
         self.location = location
         self.model_name = model_name
+        self.deployment_id = deployment_id or get_deployment_id()
 
         self.verification_progress: Optional[Dict[str, Any]] = None
         self.progress_callback: Optional[Any] = None
@@ -191,13 +194,14 @@ class MultiStepMissionRunner:
         series_list = []
 
         max_attempts = 4
+        prom_expr = f'render_farm_node_temperature_celsius{{deployment_id="{self.deployment_id}"}}'
         for attempt in range(max_attempts):
             prom_data = await self._execute_mcp_tool(
                 toolset,
                 "query_prometheus",
                 {
                     "datasourceUid": "grafanacloud-prom",
-                    "expr": "render_farm_node_temperature_celsius",
+                    "expr": prom_expr,
                     "queryType": "instant",
                     "endTime": "now",
                 }
@@ -230,13 +234,13 @@ class MultiStepMissionRunner:
                 await asyncio.sleep(3.0)
 
         if not series_list:
-            raise RuntimeError("Step 1 failed: Prometheus query returned empty metric series. No farm telemetry found.")
+            raise RuntimeError(f"Step 1 failed: Prometheus query returned empty metric series for deployment_id={self.deployment_id}. No farm telemetry found.")
 
         if not anomalous_node_id:
             raise RuntimeError(
-                f"Step 1 failed: No node exceeded the 90.0°C thermal limit in Prometheus. Temperatures: {all_node_temps}"
+                f"Step 1 failed: No node exceeded the 90.0°C thermal limit in Prometheus for deployment_id={self.deployment_id}. Temperatures: {all_node_temps}"
             )
-        logger.info("Step 1 detected anomalous_node_id=%s with temp=%.1fC", anomalous_node_id, max_temp)
+        logger.info("Step 1 detected anomalous_node_id=%s with temp=%.1fC (deployment_id=%s)", anomalous_node_id, max_temp, self.deployment_id)
 
         step1 = MissionStep(
             step_number=1,
@@ -245,7 +249,8 @@ class MultiStepMissionRunner:
             description=f"Prometheus query identified critical temperature spike on {anomalous_node_id} ({max_temp:.1f}°C, limit: 90.0°C).",
             evidence={
                 "tool": "query_prometheus",
-                "expr": "render_farm_node_temperature_celsius",
+                "expr": prom_expr,
+                "deployment_id": self.deployment_id,
                 "anomalous_node_id": anomalous_node_id,
                 "temperature_celsius": max_temp,
                 "active_series_count": len(series_list),
@@ -257,27 +262,35 @@ class MultiStepMissionRunner:
         # STEP 2: SIGNAL CORRELATION (Parse Loki Logs & Tempo Trace Spans)
         # ---------------------------------------------------------
         # 2a. Query Loki logs specifically for anomalous_node_id (most recent 10 minutes)
-        loki_data = await self._execute_mcp_tool(
-            toolset,
-            "query_loki_logs",
-            {
-                "datasourceUid": "grafanacloud-logs",
-                "logql": f'{{service_name="render-farm"}} |= "{anomalous_node_id}"',
-                "startRfc3339": "now-10m",
-                "endRfc3339": "now",
-                "limit": 30,
-            }
-        )
+        retrieved_log_lines = []
+        max_loki_attempts = 4
+        for attempt in range(max_loki_attempts):
+            loki_data = await self._execute_mcp_tool(
+                toolset,
+                "query_loki_logs",
+                {
+                    "datasourceUid": "grafanacloud-logs",
+                    "logql": f'{{service_name="render-farm"}} | deployment_id="{self.deployment_id}" |= "{anomalous_node_id}"',
+                    "startRfc3339": "now-10m",
+                    "endRfc3339": "now",
+                    "limit": 30,
+                }
+            )
 
-        log_entries = loki_data.get("data", [])
-        retrieved_log_lines = [
-            entry.get("line", "")
-            for entry in log_entries
-            if anomalous_node_id in entry.get("line", "")
-        ]
+            log_entries = loki_data.get("data", [])
+            retrieved_log_lines = [
+                entry.get("line", "")
+                for entry in log_entries
+                if anomalous_node_id in entry.get("line", "")
+            ]
+            if retrieved_log_lines:
+                break
+            if attempt < max_loki_attempts - 1:
+                logger.info("Loki query found no log entries yet for %s (ingestion latency). Retrying in 3.0s...", anomalous_node_id)
+                await asyncio.sleep(3.0)
 
         if not retrieved_log_lines:
-            raise RuntimeError(f"Step 2 failed: No Loki log entries found for anomalous node {anomalous_node_id}.")
+            raise RuntimeError(f"Step 2 failed: No Loki log entries found for anomalous node {anomalous_node_id} on deployment {self.deployment_id}.")
 
         # Prioritize critical / warning / degraded lines on the anomalous node
         critical_logs = [
@@ -312,7 +325,7 @@ class MultiStepMissionRunner:
             toolset,
             "grafana_api_request",
             {
-                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&minDuration=30s&start={start_epoch}&end={now_epoch}&limit=10",
+                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&tags=deployment_id%3D{self.deployment_id}&minDuration=30s&start={start_epoch}&end={now_epoch}&limit=10",
                 "method": "GET",
             }
         )
@@ -328,7 +341,7 @@ class MultiStepMissionRunner:
                 toolset,
                 "grafana_api_request",
                 {
-                    "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&start={start_epoch}&end={now_epoch}&limit=10",
+                    "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{anomalous_node_id}&tags=deployment_id%3D{self.deployment_id}&start={start_epoch}&end={now_epoch}&limit=10",
                     "method": "GET",
                 }
             )
@@ -434,7 +447,7 @@ Analyze the following retrieved observability signals from Grafana Cloud for ren
 
 State the technical root cause in 1 to 2 clear sentences, explaining how the hardware temperature spike caused the raytrace span duration to inflate to {raytrace_duration_s:.1f}s. Do not use em dashes.
 """
-        root_cause_response = self.genai_client.models.generate_content(
+        root_cause_response = await self.genai_client.aio.models.generate_content(
             model=self.model_name,
             contents=reasoning_prompt,
             config=types.GenerateContentConfig(
@@ -632,8 +645,11 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         verified_log_line: Optional[str] = None
         accepted_loki_ts: Optional[float] = None
         accepted_prom_ts: Optional[float] = None
+        accepted_prom_sample_ts: Optional[float] = None
+        accepted_prom_eval_ts: Optional[float] = None
         accepted_tempo_trace_id: Optional[str] = None
         tempo_raytrace_duration_s: Optional[float] = None
+        tempo_grace_deadline: Optional[float] = None
 
         witnesses_accepted: List[str] = []
         is_verified = False
@@ -667,7 +683,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                     "query_loki_logs",
                     {
                         "datasourceUid": "grafanacloud-logs",
-                        "logql": f'{{service_name="render-farm"}} |= "rendered on {chosen_standby_node}"',
+                        "logql": f'{{service_name="render-farm"}} | deployment_id="{self.deployment_id}" |= "rendered on {chosen_standby_node}"',
                         "startRfc3339": "now-5m",
                         "endRfc3339": "now",
                         "limit": 10,
@@ -686,7 +702,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             except Exception as e:
                 logger.warning("Loki verification poll failed on attempt %d: %s", poll_attempts, e)
 
-            # 2. Query Prometheus instant temperature metric on chosen_standby_node
+            # 2. Query Prometheus instant temperature metric and actual sample timestamp on chosen_standby_node
             latest_prom_entry = None
             try:
                 prom_res = await self._execute_mcp_tool(
@@ -694,7 +710,17 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                     "query_prometheus",
                     {
                         "datasourceUid": "grafanacloud-prom",
-                        "expr": f'render_farm_node_temperature_celsius{{node_id="{chosen_standby_node}"}}',
+                        "expr": f'render_farm_node_temperature_celsius{{node_id="{chosen_standby_node}", deployment_id="{self.deployment_id}"}}',
+                        "queryType": "instant",
+                        "endTime": "now",
+                    },
+                )
+                ts_res = await self._execute_mcp_tool(
+                    toolset,
+                    "query_prometheus",
+                    {
+                        "datasourceUid": "grafanacloud-prom",
+                        "expr": f'timestamp(render_farm_node_temperature_celsius{{node_id="{chosen_standby_node}", deployment_id="{self.deployment_id}"}})',
                         "queryType": "instant",
                         "endTime": "now",
                     },
@@ -702,14 +728,29 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 series_data = prom_res.get("data", [])
                 if isinstance(series_data, dict):
                     series_data = series_data.get("result", [])
+                ts_data = ts_res.get("data", [])
+                if isinstance(ts_data, dict):
+                    ts_data = ts_data.get("result", [])
+
+                p_temp = None
+                eval_ts = None
                 for s in series_data:
                     val = s.get("value", [])
                     if len(val) >= 2:
-                        p_ts = float(val[0])
+                        eval_ts = float(val[0])
                         p_temp = float(val[1])
-                        if p_ts >= (intervention_epoch - 2.0):
-                            latest_prom_entry = (p_temp, p_ts)
-                            break
+                        break
+
+                actual_sample_ts = None
+                for s in ts_data:
+                    val = s.get("value", [])
+                    if len(val) >= 2:
+                        actual_sample_ts = float(val[1])
+                        break
+
+                if p_temp is not None and actual_sample_ts is not None:
+                    if actual_sample_ts >= (intervention_epoch - 0.5):
+                        latest_prom_entry = (p_temp, actual_sample_ts, eval_ts or actual_sample_ts)
             except Exception as e:
                 logger.warning("Prometheus verification poll failed on attempt %d: %s", poll_attempts, e)
 
@@ -722,7 +763,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                     toolset,
                     "grafana_api_request",
                     {
-                        "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{chosen_standby_node}&start={start_epoch}&end={now_epoch}&limit=5",
+                        "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{chosen_standby_node}&tags=deployment_id%3D{self.deployment_id}&start={start_epoch}&end={now_epoch}&limit=5",
                         "method": "GET",
                     },
                 )
@@ -741,9 +782,38 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
 
             # Check if Loki and Prometheus samples are both retrieved
             if latest_loki_entry is not None and latest_prom_entry is not None:
+                # If Tempo is not yet available, continue polling Tempo alone for up to 30s
+                if latest_tempo_entry is None:
+                    if tempo_grace_deadline is None:
+                        tempo_grace_deadline = time.time() + 30.0
+                        logger.info(
+                            "Loki and Prometheus verified for %s. Polling Tempo for up to 30s to acquire 3rd witness...",
+                            chosen_standby_node,
+                        )
+
+                    if time.time() < tempo_grace_deadline and (time.time() - window_start_time + effective_interval) < effective_max_poll:
+                        elapsed = int(time.time() - window_start_time)
+                        grace_elapsed = int(30.0 - (tempo_grace_deadline - time.time()))
+                        self.verification_progress = {
+                            "active": True,
+                            "target_node": chosen_standby_node,
+                            "elapsed_seconds": elapsed,
+                            "max_window_seconds": 150,
+                            "message": f"Frame confirmed on {chosen_standby_node}. Awaiting Tempo trace correlation ({grace_elapsed}s/30s).",
+                        }
+                        if self.progress_callback:
+                            try:
+                                self.progress_callback(self.verification_progress)
+                            except Exception:
+                                pass
+                        await asyncio.sleep(effective_interval)
+                        continue
+
+                # Finalize verification with all retrieved telemetry
                 verified_log_line, verified_rate_sec, accepted_loki_ts = latest_loki_entry
                 verified_temp_c = round(latest_prom_entry[0], 1)
-                accepted_prom_ts = latest_prom_entry[1]
+                accepted_prom_sample_ts = latest_prom_entry[1]
+                accepted_prom_eval_ts = latest_prom_entry[2]
 
                 witnesses_accepted = ["Loki", "Prometheus"]
                 if latest_tempo_entry is not None:
@@ -838,6 +908,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             description=step6_desc,
             evidence={
                 "target_node": chosen_standby_node,
+                "deployment_id": self.deployment_id,
                 "intervention_ts": intervention_ts.isoformat(),
                 "intervention_epoch": intervention_epoch,
                 "baseline_seconds": normal_sec,
@@ -848,7 +919,9 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "verification_passed": is_verified,
                 "quoted_loki_log": verified_log_line,
                 "loki_timestamp": accepted_loki_ts,
-                "prometheus_sample_timestamp": accepted_prom_ts,
+                "prometheus_actual_sample_timestamp": accepted_prom_sample_ts,
+                "prometheus_sample_timestamp": accepted_prom_sample_ts,
+                "prometheus_evaluation_timestamp": accepted_prom_eval_ts,
                 "tempo_trace_id": accepted_tempo_trace_id,
                 "tempo_raytrace_duration_seconds": tempo_raytrace_duration_s,
                 "witnesses_accepted": witnesses_accepted,
@@ -904,7 +977,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             human_recommendation=human_recommendation,
         )
 
-        response = self.genai_client.models.generate_content(
+        response = await self.genai_client.aio.models.generate_content(
             model=self.model_name,
             contents=prompt_content,
             config=types.GenerateContentConfig(

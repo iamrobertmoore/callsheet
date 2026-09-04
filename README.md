@@ -60,6 +60,7 @@ Callsheet enforces strict telemetry boundary isolation across its entire decisio
 - What the Farm Is: There is no actual render farm behind this; the machines are simulated. But the metrics, logs, and trace spans they emit are genuine OpenTelemetry sent to a real Grafana Cloud stack via an OTLP gateway, and the agent reads them back the same way it would read real hardware. Callsheet queries that telemetry through MCP exactly as it would against physical on-premise blade servers, cloud instances, or commercial render farm managers.
 - Transition to Physical Infrastructure: To connect Callsheet to physical studio hardware, only the telemetry emitter changes. The agent reasoning loop, MCP tool bindings, deterministic gates, and briefing pipelines remain identical.
 - Stated Baseline Render Rate: The baseline render rate (20.0 seconds per frame) is an explicit stated parameter of the simulator representing nominal throughput, rather than a wall-clock measurement subject to vCPU jitter. Downstream contractual buffer arithmetic is derived deterministically from this stated baseline.
+- Telemetry Stream Isolation: Every emitter stamps deployment_id (cloud-run in production, local-<hostname> elsewhere) across metrics, logs, and spans, ensuring agent queries strictly isolate their own streams and prevent test runs from polluting production.
 
 ## Local Setup and Verification
 

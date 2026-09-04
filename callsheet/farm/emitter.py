@@ -29,6 +29,18 @@ from callsheet.farm.simulator import RenderFarmSimulator
 logger = logging.getLogger(__name__)
 
 
+def get_deployment_id() -> str:
+    """Returns deployment identifier: cloud-run on Cloud Run, or local-<hostname> elsewhere."""
+    dep = os.environ.get("DEPLOYMENT_ID")
+    if dep:
+        return dep
+    if os.environ.get("K_REVISION") or os.environ.get("K_SERVICE"):
+        return "cloud-run"
+    import socket
+    hostname = socket.gethostname() or "unknown"
+    return f"local-{hostname}"
+
+
 class FarmTelemetryEmitter:
     """
     Emits continuous metrics, logs, and traces for the render farm to Grafana Cloud via OTLP.
@@ -36,10 +48,12 @@ class FarmTelemetryEmitter:
 
     def __init__(self, simulator: RenderFarmSimulator):
         self.simulator = simulator
+        self.deployment_id = get_deployment_id()
         self.resource = Resource.create({
             "service.name": "render-farm",
             "service.version": "0.1.0",
             "deployment.environment": "production",
+            "deployment_id": self.deployment_id,
         })
         
         self._init_metrics()
@@ -135,6 +149,7 @@ class FarmTelemetryEmitter:
                 "node_id": node.id,
                 "node_name": node.name,
                 "gpu_type": node.gpu_type,
+                "deployment_id": self.deployment_id,
             }
             
             status_map = {
@@ -188,6 +203,7 @@ class FarmTelemetryEmitter:
                 "shot_code": shot.shot_code,
                 "show_id": shot.show_id,
                 "sequence": shot.sequence,
+                "deployment_id": self.deployment_id,
             }
 
             self.gauge_shot_progress.set(shot.progress_ratio, shot_labels)
@@ -219,6 +235,7 @@ class FarmTelemetryEmitter:
         attributes = {
             "service.name": "render-farm",
             "log.level": level.upper(),
+            "deployment_id": self.deployment_id,
         }
         if node_id:
             attributes["node_id"] = node_id
@@ -271,6 +288,7 @@ class FarmTelemetryEmitter:
             "show.name": show_name,
             "duration.seconds": duration_seconds,
             "node.throttled": is_throttled,
+            "deployment_id": self.deployment_id,
         }
         if temperature_celsius is not None:
             root_attrs["node.temperature_celsius"] = round(temperature_celsius, 1)
@@ -297,6 +315,7 @@ class FarmTelemetryEmitter:
                 "textures.size_mb": 1450,
                 "node_id": node_id,
                 "node.id": node_id,
+                "deployment_id": self.deployment_id,
             },
         )
         s1.end(end_time=t1_end_ns)
@@ -318,6 +337,7 @@ class FarmTelemetryEmitter:
             "node_id": node_id,
             "node.id": node_id,
             "duration_seconds": round(raytrace_dur, 2),
+            "deployment_id": self.deployment_id,
         }
         if is_throttled:
             s2_attrs["warning"] = "CPU clock frequency throttled to 800MHz due to high thermal junction temp"
@@ -343,6 +363,7 @@ class FarmTelemetryEmitter:
                 "lut": "ACEScg",
                 "node_id": node_id,
                 "node.id": node_id,
+                "deployment_id": self.deployment_id,
             },
         )
         s3.end(end_time=t3_end_ns)
@@ -352,7 +373,7 @@ class FarmTelemetryEmitter:
 
         self.hist_frame_duration.record(
             duration_seconds,
-            {"node_id": node_id, "shot_code": shot_code}
+            {"node_id": node_id, "shot_code": shot_code, "deployment_id": self.deployment_id}
         )
 
     def process_events(self, events: list[dict]) -> None:
