@@ -9,11 +9,11 @@ import os
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from callsheet.agent.mission import MultiStepMissionRunner
+from callsheet.agent.mission import MultiStepMissionRunner, MISSION_PANEL_IMAGES
 from callsheet.farm.models import ScenarioType
 from callsheet.farm.simulator import RenderFarmSimulator
 from callsheet.farm.worker import FarmWorker
@@ -147,6 +147,15 @@ async def run_mission(req: MissionRequest):
 async def get_interventions():
     """Returns the history of interventions executed by Callsheet."""
     return [r.model_dump(mode="json") for r in dispatcher.list_history()]
+
+
+@app.get("/api/missions/{mission_id}/panel.png")
+async def get_mission_panel_png(mission_id: str):
+    """Serves the rendered Grafana panel PNG captured during mission execution."""
+    image_bytes = MISSION_PANEL_IMAGES.get(mission_id)
+    if not image_bytes:
+        raise HTTPException(status_code=404, detail="Panel image not found for mission")
+    return Response(content=image_bytes, media_type="image/png")
 
 
 
@@ -402,6 +411,75 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
         summary_str = f"{active_count} ACTIVE / {standby_count} STANDBY"
 
     return ''.join(tiles), summary_str
+
+
+def render_ssr_briefing(mission: Optional[dict]) -> str:
+    if not mission:
+        return ""
+    briefing_text = mission.get("callsheet_briefing", "")
+    md_html = format_markdown_to_html(briefing_text)
+    incident_id = mission.get("incident_id")
+    incident_url = mission.get("incident_url")
+    incident_status = mission.get("incident_status")
+    time_res = mission.get("time_intervention_to_resolved_seconds")
+    deeplinks = mission.get("deeplinks", {})
+    panel_img = mission.get("panel_image_url")
+    reads = mission.get("mcp_read_calls", 0)
+    writes = mission.get("mcp_write_calls", 0)
+
+    if not (incident_id or incident_url or deeplinks or panel_img):
+        return md_html
+
+    is_resolved = (incident_status == "resolved")
+    badge_class = "badge-resolved" if is_resolved else "badge-active"
+    status_label = f"RESOLVED IN {time_res:.1f}s" if (is_resolved and time_res) else ("RESOLVED" if is_resolved else "ACTIVE")
+    inc_url = incident_url or "#"
+
+    cards = [f"""
+        <div class="grafana-writeback-card">
+            <div class="grafana-incident-row">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="incident-badge {badge_class}">{status_label}</span>
+                    <span style="font-family: var(--font-condensed); font-weight: 700; font-size: 12px; color: var(--text-primary);">
+                        GRAFANA IRM INCIDENT #{incident_id or ''}
+                    </span>
+                </div>
+                <a href="{inc_url}" target="_blank" rel="noopener noreferrer" class="deeplink-btn" style="color: var(--accent);">
+                    OPEN INCIDENT IN GRAFANA &rarr;
+                </a>
+            </div>
+    """]
+
+    if deeplinks:
+        cards.append("""
+            <div style="font-family: var(--font-condensed); font-size: 10px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px;">
+                PERSISTENT TELEMETRY EVIDENCE DEEPLINKS (PINNED ABSOLUTE TIME RANGE)
+            </div>
+            <div class="deeplinks-grid">
+        """)
+        if deeplinks.get("prometheus"):
+            cards.append(f'<a href="{deeplinks["prometheus"]}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Prometheus Explore &nearr;</a>')
+        if deeplinks.get("loki"):
+            cards.append(f'<a href="{deeplinks["loki"]}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Loki Logs Explore &nearr;</a>')
+        if deeplinks.get("tempo"):
+            cards.append(f'<a href="{deeplinks["tempo"]}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Tempo Trace Explore &nearr;</a>')
+        if deeplinks.get("dashboard"):
+            cards.append(f'<a href="{deeplinks["dashboard"]}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Control Tower Dashboard &nearr;</a>')
+        cards.append("</div>")
+
+    if panel_img:
+        cards.append(f"""
+            <div class="panel-snapshot-box">
+                <img src="{panel_img}" alt="Grafana Control Tower Panel Snapshot" loading="lazy" />
+                <div class="panel-snapshot-meta">
+                    <span>CONTROL TOWER PANEL SNAPSHOT (get_panel_image)</span>
+                    <span>MCP TOOL CALLS: {reads} READS / {writes} WRITES</span>
+                </div>
+            </div>
+        """)
+
+    cards.append("</div>")
+    return "".join(cards) + md_html
 
 
 PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
@@ -1086,6 +1164,98 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             100% { box-shadow: 0 0 0 0 rgba(237, 233, 227, 0); }
         }
 
+        /* MCP Grafana Write-back and Deeplinks Styles */
+        .grafana-writeback-card {
+            background: var(--surface-inset);
+            border: 1px solid var(--rule);
+            border-radius: 2px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+        .grafana-incident-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--rule);
+        }
+        .incident-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-family: var(--font-condensed);
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            padding: 3px 8px;
+            border-radius: 2px;
+        }
+        .badge-active {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--state-critical);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+        }
+        .badge-resolved {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--state-healthy);
+            border: 1px solid rgba(16, 185, 129, 0.4);
+        }
+        .deeplinks-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .deeplink-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            background: var(--surface);
+            border: 1px solid var(--rule);
+            color: var(--text-primary);
+            font-family: var(--font-condensed);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            padding: 6px 10px;
+            border-radius: 2px;
+            text-decoration: none;
+            transition: all 0.15s ease;
+        }
+        .deeplink-btn:hover {
+            background: var(--surface-hover);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .panel-snapshot-box {
+            margin-top: 10px;
+            border: 1px solid var(--rule);
+            border-radius: 2px;
+            overflow: hidden;
+            background: #0b0c0e;
+        }
+        .panel-snapshot-box img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .panel-snapshot-meta {
+            padding: 6px 10px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-dim);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-top: 1px solid var(--rule);
+        }
+
         /* Footer Disclosure */
         .footer-note {
             text-align: center;
@@ -1445,7 +1615,61 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 timeLabel.innerText = `Mission completed: ${utcHours}:${utcMinutes}:${utcSeconds} UTC`;
             }
 
-            container.innerHTML = formatMarkdown(mission.callsheet_briefing);
+            let writebackHtml = '';
+            if (mission.incident_url || mission.incident_id || (mission.deeplinks && Object.keys(mission.deeplinks).length > 0)) {
+                const isResolved = (mission.incident_status === 'resolved');
+                const badgeClass = isResolved ? 'badge-resolved' : 'badge-active';
+                const timeSec = mission.time_intervention_to_resolved_seconds;
+                const statusLabel = isResolved ? (timeSec ? `RESOLVED IN ${timeSec.toFixed(1)}s` : 'RESOLVED') : 'ACTIVE';
+                const incUrl = mission.incident_url || '#';
+
+                writebackHtml += `
+                    <div class="grafana-writeback-card">
+                        <div class="grafana-incident-row">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="incident-badge ${badgeClass}">${statusLabel}</span>
+                                <span style="font-family: var(--font-condensed); font-weight: 700; font-size: 12px; color: var(--text-primary);">
+                                    GRAFANA IRM INCIDENT #${mission.incident_id || ''}
+                                </span>
+                            </div>
+                            <a href="${incUrl}" target="_blank" rel="noopener noreferrer" class="deeplink-btn" style="color: var(--accent);">
+                                OPEN INCIDENT IN GRAFANA &rarr;
+                            </a>
+                        </div>
+                `;
+
+                if (mission.deeplinks && Object.keys(mission.deeplinks).length > 0) {
+                    writebackHtml += `
+                        <div style="font-family: var(--font-condensed); font-size: 10px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px;">
+                            PERSISTENT TELEMETRY EVIDENCE DEEPLINKS (PINNED ABSOLUTE TIME RANGE)
+                        </div>
+                        <div class="deeplinks-grid">
+                            ${mission.deeplinks.prometheus ? `<a href="${mission.deeplinks.prometheus}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Prometheus Explore &nearr;</a>` : ''}
+                            ${mission.deeplinks.loki ? `<a href="${mission.deeplinks.loki}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Loki Logs Explore &nearr;</a>` : ''}
+                            ${mission.deeplinks.tempo ? `<a href="${mission.deeplinks.tempo}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Tempo Trace Explore &nearr;</a>` : ''}
+                            ${mission.deeplinks.dashboard ? `<a href="${mission.deeplinks.dashboard}" target="_blank" rel="noopener noreferrer" class="deeplink-btn">Control Tower Dashboard &nearr;</a>` : ''}
+                        </div>
+                    `;
+                }
+
+                if (mission.panel_image_url) {
+                    const reads = mission.mcp_read_calls || 0;
+                    const writes = mission.mcp_write_calls || 0;
+                    writebackHtml += `
+                        <div class="panel-snapshot-box">
+                            <img src="${mission.panel_image_url}" alt="Grafana Control Tower Panel Snapshot" loading="lazy" />
+                            <div class="panel-snapshot-meta">
+                                <span>CONTROL TOWER PANEL SNAPSHOT (get_panel_image)</span>
+                                <span>MCP TOOL CALLS: ${reads} READS / ${writes} WRITES</span>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                writebackHtml += `</div>`;
+            }
+
+            container.innerHTML = writebackHtml + formatMarkdown(mission.callsheet_briefing);
         }
 
         function renderTrail(steps) {
@@ -1788,8 +2012,7 @@ async def get_producer_dashboard():
     slate_html = render_ssr_slate(state.shows, mission)
     fleet_html, fleet_summary = render_ssr_fleet(state.nodes, mission=mission)
 
-    briefing_text = mission.get("callsheet_briefing", "") if mission else ""
-    briefing_html = format_markdown_to_html(briefing_text)
+    briefing_html = render_ssr_briefing(mission)
     steps = mission.get("steps", []) if mission else []
     trail_html = render_ssr_trail(steps)
 

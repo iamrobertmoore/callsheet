@@ -5,6 +5,7 @@ echo "=== Starting Callsheet Production Server ==="
 
 PORT="${PORT:-8080}"
 MCP_PORT="${MCP_PORT:-8000}"
+export GRAFANA_ORG_ID="${GRAFANA_ORG_ID:-1}"
 
 # Start mcp-grafana background server if binary exists
 if command -v mcp-grafana >/dev/null 2>&1; then

@@ -6,9 +6,11 @@ intervention summaries using Vertex AI Gemini.
 """
 
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -33,6 +35,9 @@ from callsheet.mcp.client import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Registry of rendered panel PNG images keyed by mission ID
+MISSION_PANEL_IMAGES: Dict[str, bytes] = {}
 
 
 class MissionStep(BaseModel):
@@ -61,6 +66,15 @@ class MissionResult(BaseModel):
     verification_status: str
     steps: List[MissionStep]
     callsheet_briefing: str
+    incident_id: Optional[str] = None
+    incident_url: Optional[str] = None
+    incident_status: Optional[str] = None
+    annotation_id: Optional[int] = None
+    deeplinks: Dict[str, str] = Field(default_factory=dict)
+    panel_image_url: Optional[str] = None
+    time_intervention_to_resolved_seconds: Optional[float] = None
+    mcp_read_calls: int = 0
+    mcp_write_calls: int = 0
 
 
 def parse_loki_timestamp(ts_raw: Any) -> Optional[float]:
@@ -124,6 +138,10 @@ class MultiStepMissionRunner:
         self.location = location
         self.model_name = model_name
         self.deployment_id = deployment_id or get_deployment_id()
+        self.grafana_url = (os.getenv("GRAFANA_URL") or "").rstrip("/")
+        self.dashboard_uid = os.getenv("GRAFANA_FARM_DASHBOARD_UID", "callsheet-control-tower")
+        self.mcp_read_calls = 0
+        self.mcp_write_calls = 0
 
         self.verification_progress: Optional[Dict[str, Any]] = None
         self.progress_callback: Optional[Any] = None
@@ -138,8 +156,21 @@ class MultiStepMissionRunner:
 
     async def _execute_mcp_tool(self, toolset, tool_name: str, arguments: dict) -> dict:
         """
-        Executes an MCP tool call. Raises RuntimeError if the call fails or errors.
+        Executes an MCP tool call. Counts reads and writes.
+        Raises RuntimeError if the call fails or errors.
         """
+        WRITE_TOOLS = {
+            "create_incident",
+            "add_activity_to_incident",
+            "update_incident",
+            "create_annotation",
+            "update_annotation",
+        }
+        if tool_name in WRITE_TOOLS:
+            self.mcp_write_calls += 1
+        else:
+            self.mcp_read_calls += 1
+
         try:
             res = await toolset._execute_with_session(
                 lambda session: session.call_tool(tool_name, arguments=arguments),
@@ -152,8 +183,15 @@ class MultiStepMissionRunner:
             error_msg = res.content[0].text if res.content else "Unknown MCP error"
             raise RuntimeError(f"Grafana MCP tool {tool_name} returned error: {error_msg}")
 
-        # Parse text content from response
+        # Parse content from response
         if hasattr(res, "content") and res.content:
+            for item in res.content:
+                if getattr(item, "type", None) == "image" or hasattr(item, "data"):
+                    return {
+                        "_is_image": True,
+                        "data": getattr(item, "data", ""),
+                        "mimeType": getattr(item, "mimeType", "image/png"),
+                    }
             raw_text = res.content[0].text
             try:
                 return json.loads(raw_text)
@@ -161,6 +199,128 @@ class MultiStepMissionRunner:
                 return {"raw_text": raw_text}
 
         return {}
+
+    async def _discover_dashboard_uid(self, toolset) -> str:
+        """
+        Discovers the farm dashboard UID via search_dashboards.
+        Falls back to GRAFANA_FARM_DASHBOARD_UID env var if search returns nothing.
+        """
+        try:
+            res = await self._execute_mcp_tool(toolset, "search_dashboards", {"query": "Callsheet"})
+            dashboards = res.get("dashboards", []) if isinstance(res, dict) else []
+            for d in dashboards:
+                if d.get("type") == "dash-db" and "uid" in d:
+                    uid = d["uid"]
+                    logger.info("Discovered farm dashboard '%s' (UID: %s) via search_dashboards", d.get("title"), uid)
+                    return uid
+        except Exception as e:
+            logger.warning("search_dashboards failed: %s", e)
+
+        fallback = os.getenv("GRAFANA_FARM_DASHBOARD_UID", "callsheet-control-tower")
+        logger.info("Farm dashboard not found via search_dashboards, falling back to: %s", fallback)
+        return fallback
+
+    async def _generate_four_deeplinks(
+        self,
+        toolset,
+        anomalous_node_id: str,
+        chosen_standby_node: str,
+        tempo_trace_id: str,
+        from_ms: int,
+        to_ms: int,
+    ) -> Dict[str, str]:
+        """
+        Generates four absolute deeplinks:
+        1. Prometheus explore (temperature query on anomalous node)
+        2. Loki explore (frame logs query on standby node)
+        3. Tempo explore (traceql query on trace ID)
+        4. Dashboard (at absolute incident time range)
+        """
+        links: Dict[str, str] = {}
+        # 1. Prometheus Explore
+        try:
+            res1 = await self._execute_mcp_tool(
+                toolset,
+                "generate_deeplink",
+                {
+                    "resourceType": "explore",
+                    "datasourceUid": "grafanacloud-prom",
+                    "queries": [
+                        {
+                            "refId": "A",
+                            "expr": f'render_farm_node_temperature_celsius{{deployment_id="{self.deployment_id}", node_id="{anomalous_node_id}"}}',
+                        }
+                    ],
+                    "timeRange": {"from": str(from_ms), "to": str(to_ms)},
+                },
+            )
+            links["prometheus"] = res1.get("raw_text") or res1.get("url") or ""
+        except Exception as e:
+            logger.warning("Failed to generate Prometheus deeplink: %s", e)
+            links["prometheus"] = ""
+
+        # 2. Loki Explore
+        try:
+            res2 = await self._execute_mcp_tool(
+                toolset,
+                "generate_deeplink",
+                {
+                    "resourceType": "explore",
+                    "datasourceUid": "grafanacloud-logs",
+                    "queries": [
+                        {
+                            "refId": "A",
+                            "expr": f'{{deployment_id="{self.deployment_id}", service_name="render-farm", node_id="{chosen_standby_node}"}}',
+                        }
+                    ],
+                    "timeRange": {"from": str(from_ms), "to": str(to_ms)},
+                },
+            )
+            links["loki"] = res2.get("raw_text") or res2.get("url") or ""
+        except Exception as e:
+            logger.warning("Failed to generate Loki deeplink: %s", e)
+            links["loki"] = ""
+
+        # 3. Tempo Trace Explore
+        try:
+            res3 = await self._execute_mcp_tool(
+                toolset,
+                "generate_deeplink",
+                {
+                    "resourceType": "explore",
+                    "datasourceUid": "grafanacloud-traces",
+                    "queries": [
+                        {
+                            "refId": "A",
+                            "queryType": "traceql",
+                            "query": tempo_trace_id,
+                        }
+                    ],
+                    "timeRange": {"from": str(from_ms), "to": str(to_ms)},
+                },
+            )
+            links["tempo"] = res3.get("raw_text") or res3.get("url") or ""
+        except Exception as e:
+            logger.warning("Failed to generate Tempo deeplink: %s", e)
+            links["tempo"] = ""
+
+        # 4. Control Tower Dashboard
+        try:
+            res4 = await self._execute_mcp_tool(
+                toolset,
+                "generate_deeplink",
+                {
+                    "resourceType": "dashboard",
+                    "dashboardUid": self.dashboard_uid,
+                    "timeRange": {"from": str(from_ms), "to": str(to_ms)},
+                },
+            )
+            links["dashboard"] = res4.get("raw_text") or res4.get("url") or ""
+        except Exception as e:
+            logger.warning("Failed to generate Dashboard deeplink: %s", e)
+            links["dashboard"] = ""
+
+        return links
 
     async def execute_mission(
         self,
@@ -184,6 +344,7 @@ class MultiStepMissionRunner:
         # Connect to MCP toolset
         params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
         toolset = create_grafana_mcp_toolset(params)
+        self.dashboard_uid = await self._discover_dashboard_uid(toolset)
 
         # ---------------------------------------------------------
         # STEP 1: DETECT METRIC ANOMALY (Parse Prometheus Response with retry)
@@ -539,6 +700,62 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "penalty_clause": penalty_str,
             },
         )
+
+        # Create Grafana IRM Incident via MCP create_incident
+        deficit_hours = abs(unmitigated_buffer_hours)
+        now_utc_str = now_dt.strftime("%Y-%m-%d %H:%M UTC")
+        title_core = f"{show_name} | Shot {target_shot.shot_code} | {anomalous_node_id} | Deficit {deficit_hours:.1f}h | {now_utc_str}"
+        if self.deployment_id != "cloud-run":
+            incident_title = f"[{self.deployment_id}] {title_core}"
+        else:
+            incident_title = title_core
+
+        incident_severity = "critical" if deficit_hours > 2.0 else "major"
+        is_drill = (self.deployment_id != "cloud-run")
+        room_prefix = f"callsheet-{target_shot.shot_code.lower()}"
+
+        incident_id = None
+        incident_url = None
+        incident_status = None
+        try:
+            inc_res = await self._execute_mcp_tool(
+                toolset,
+                "create_incident",
+                {
+                    "title": incident_title,
+                    "severity": incident_severity,
+                    "roomPrefix": room_prefix,
+                    "isDrill": is_drill,
+                    "labels": [
+                        {"key": "deployment_id", "label": self.deployment_id},
+                        {"key": "source", "label": "callsheet"},
+                        {"key": "show", "label": show_name},
+                        {"key": "node", "label": anomalous_node_id},
+                        {"key": "shot", "label": target_shot.shot_code},
+                    ],
+                },
+            )
+            raw_id = (
+                inc_res.get("incidentID")
+                or inc_res.get("incidentId")
+                or inc_res.get("id")
+                or (inc_res.get("incident", {}).get("id") if isinstance(inc_res.get("incident"), dict) else None)
+            )
+            if raw_id:
+                incident_id = str(raw_id)
+                incident_status = "active"
+                overview_url = inc_res.get("overviewURL") or (inc_res.get("incident", {}).get("overviewURL") if isinstance(inc_res.get("incident"), dict) else None)
+                if overview_url:
+                    incident_url = overview_url if str(overview_url).startswith("http") else f"{self.grafana_url}{overview_url}"
+                else:
+                    incident_url = f"{self.grafana_url}/a/grafana-irm-app/incidents/{incident_id}"
+                logger.info("Created Grafana IRM Incident #%s: %s", incident_id, incident_url)
+        except Exception as e:
+            logger.warning("Failed to create Grafana IRM incident (non-blocking): %s", e)
+
+        step4.evidence["incident_id"] = incident_id
+        step4.evidence["incident_url"] = incident_url
+        step4.evidence["incident_status"] = incident_status
         steps.append(step4)
 
         # ---------------------------------------------------------
@@ -606,6 +823,51 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                     f"does not match Prometheus sample ({prom_temp:.1f}°C)."
                 )
 
+        intervention_ts = intervention_record.timestamp
+        intervention_epoch = intervention_ts.timestamp()
+
+        # Add activity to Grafana IRM incident
+        if incident_id:
+            try:
+                await self._execute_mcp_tool(
+                    toolset,
+                    "add_activity_to_incident",
+                    {
+                        "incidentId": incident_id,
+                        "body": (
+                            f"Step 5 Workload Reallocation executed:\n"
+                            f"- Shot: {target_shot.shot_code}\n"
+                            f"- Migrated from: {anomalous_node_id} ({max_temp:.1f}C) to {chosen_standby_node}\n"
+                            f"- Quarantined: {anomalous_node_id}\n"
+                            f"- Restored buffer margin: +{intervention_record.buffer_margin_hours:.1f}h"
+                        ),
+                    },
+                )
+            except Exception as e:
+                logger.warning("Failed to add Step 5 activity to incident #%s: %s", incident_id, e)
+
+        # Create dashboard-wide annotation in Grafana
+        annotation_id = None
+        try:
+            ann_res = await self._execute_mcp_tool(
+                toolset,
+                "create_annotation",
+                {
+                    "dashboardUid": self.dashboard_uid,
+                    "time": int(intervention_epoch * 1000),
+                    "text": f"Callsheet Intervention: Shot {target_shot.shot_code} migrated from {anomalous_node_id} ({max_temp:.1f}C) to {chosen_standby_node}",
+                    "tags": ["callsheet", "intervention", anomalous_node_id, target_shot.shot_code, self.deployment_id],
+                },
+            )
+            payload = ann_res.get("Payload") if isinstance(ann_res, dict) else None
+            if isinstance(payload, dict):
+                annotation_id = payload.get("id")
+            elif isinstance(ann_res, dict):
+                annotation_id = ann_res.get("id")
+            logger.info("Created Grafana dashboard annotation ID: %s", annotation_id)
+        except Exception as e:
+            logger.warning("Failed to create dashboard annotation (non-blocking): %s", e)
+
         step5 = MissionStep(
             step_number=5,
             name="Workload Reallocation Intervention",
@@ -622,6 +884,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "unmitigated_buffer_hours": round(unmitigated_buffer_hours, 1),
                 "restored_buffer_margin_hours": intervention_record.buffer_margin_hours,
                 "status": intervention_record.status,
+                "annotation_id": annotation_id,
             },
         )
         steps.append(step5)
@@ -901,6 +1164,98 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 f"Intervention status left at PENDING_VERIFICATION. Immediate Technical Director investigation required."
             )
 
+        # Epoch calculations for absolute time range
+        verified_epoch = time.time()
+        verified_ms = int(verified_epoch * 1000)
+        from_ms = int((intervention_epoch - 300) * 1000)
+        to_ms = int((verified_epoch + 300) * 1000)
+
+        # Generate four absolute deeplinks
+        deeplinks = await self._generate_four_deeplinks(
+            toolset=toolset,
+            anomalous_node_id=anomalous_node_id,
+            chosen_standby_node=chosen_standby_node,
+            tempo_trace_id=accepted_tempo_trace_id or trace_id,
+            from_ms=from_ms,
+            to_ms=to_ms,
+        )
+
+        # Annotation update to region or failure annotation
+        if verification_status == "VERIFIED_PROTECTED":
+            if annotation_id:
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "update_annotation",
+                        {
+                            "id": int(annotation_id),
+                            "timeEnd": verified_ms,
+                            "text": (
+                                f"Callsheet Verified Protected: Shot {target_shot.shot_code} on {chosen_standby_node} "
+                                f"({verified_rate_sec:.1f}s/frame, {verified_temp_c:.1f}C). Witnesses: {', '.join(witnesses_accepted)}."
+                            ),
+                            "tags": ["callsheet", "intervention", "verified", chosen_standby_node, target_shot.shot_code, self.deployment_id],
+                        },
+                    )
+                    logger.info("Updated annotation ID %s to region ending at %d", annotation_id, verified_ms)
+                except Exception as e:
+                    logger.warning("Failed to update annotation ID %s: %s", annotation_id, e)
+        else:
+            fail_tag = "verification-failed" if verification_status == "ESCALATED" else "verification-inconclusive"
+            try:
+                await self._execute_mcp_tool(
+                    toolset,
+                    "create_annotation",
+                    {
+                        "dashboardUid": self.dashboard_uid,
+                        "time": verified_ms,
+                        "text": f"Callsheet Verification: {verification_status} on {chosen_standby_node}",
+                        "tags": ["callsheet", fail_tag, chosen_standby_node, self.deployment_id],
+                    },
+                )
+            except Exception as e:
+                logger.warning("Failed to create verification failure annotation: %s", e)
+
+        # Incident resolution & activity
+        time_intervention_to_resolved_seconds = None
+        if incident_id:
+            links_formatted = "\n".join([f"- **{k.upper()}**: {v}" for k, v in deeplinks.items() if v])
+            verification_activity = (
+                f"Step 6 Post-Intervention Verification: **{verification_status}**\n\n"
+                f"- Target Node: {chosen_standby_node}\n"
+                f"- Frame Rate: {verified_rate_sec:.1f}s/frame (threshold {rate_limit_seconds:.1f}s)\n"
+                f"- Node Temperature: {verified_temp_c:.1f}C\n"
+                f"- Witnesses Accepted: {', '.join(witnesses_accepted)}\n\n"
+                f"Absolute Evidence Deeplinks:\n{links_formatted}"
+            )
+            try:
+                await self._execute_mcp_tool(
+                    toolset,
+                    "add_activity_to_incident",
+                    {
+                        "incidentId": incident_id,
+                        "body": verification_activity,
+                    },
+                )
+            except Exception as e:
+                logger.warning("Failed to add Step 6 verification activity to incident #%s: %s", incident_id, e)
+
+            if verification_status == "VERIFIED_PROTECTED":
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "update_incident",
+                        {
+                            "incidentId": incident_id,
+                            "status": "resolved",
+                        },
+                    )
+                    incident_status = "resolved"
+                    time_intervention_to_resolved_seconds = round(time.time() - intervention_epoch, 1)
+                    logger.info("Resolved Grafana IRM incident #%s in %.1fs", incident_id, time_intervention_to_resolved_seconds)
+                except Exception as e:
+                    logger.warning("Failed to resolve Grafana IRM incident #%s: %s", incident_id, e)
+
         step6 = MissionStep(
             step_number=6,
             name="Post-Intervention Telemetry Verification (Grafana Cloud)",
@@ -929,6 +1284,10 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "human_recommendation": human_recommendation,
                 "poll_attempts": poll_attempts,
                 "elapsed_seconds": elapsed_total,
+                "deeplinks": deeplinks,
+                "incident_id": incident_id,
+                "incident_status": incident_status,
+                "time_intervention_to_resolved_seconds": time_intervention_to_resolved_seconds,
             },
         )
         steps.append(step6)
@@ -992,6 +1351,45 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         briefing_text = briefing_text.replace("Callshet", "Callsheet")
         briefing_text = briefing_text.replace("\u2014", " - ").replace("\u2013", "-")
 
+        mission_id = f"mission_{uuid.uuid4().hex[:8]}"
+
+        # Capture Panel Image via MCP get_panel_image
+        panel_image_url = None
+        try:
+            img_res = await self._execute_mcp_tool(
+                toolset,
+                "get_panel_image",
+                {
+                    "dashboardUid": self.dashboard_uid,
+                    "panelId": 1,
+                    "width": 1000,
+                    "height": 500,
+                    "timeRange": {"from": str(from_ms), "to": str(to_ms)},
+                },
+            )
+            if isinstance(img_res, dict) and img_res.get("_is_image") and img_res.get("data"):
+                img_bytes = base64.b64decode(img_res["data"])
+                MISSION_PANEL_IMAGES[mission_id] = img_bytes
+                panel_image_url = f"/api/missions/{mission_id}/panel.png"
+                logger.info("Captured Grafana panel image (%d bytes) for mission %s", len(img_bytes), mission_id)
+        except Exception as e:
+            logger.warning("Failed to capture panel image: %s", e)
+
+        # Briefing Activity on Incident
+        if incident_id:
+            try:
+                briefing_preview = briefing_text[:600] + ("..." if len(briefing_text) > 600 else "")
+                await self._execute_mcp_tool(
+                    toolset,
+                    "add_activity_to_incident",
+                    {
+                        "incidentId": incident_id,
+                        "body": f"Producer Callsheet Briefing:\n\n{briefing_preview}",
+                    },
+                )
+            except Exception as e:
+                logger.warning("Failed to add Step 7 briefing activity to incident #%s: %s", incident_id, e)
+
         step7 = MissionStep(
             step_number=7,
             name="Producer Callsheet Briefing",
@@ -1000,11 +1398,15 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             evidence={
                 "briefing_length": len(briefing_text),
                 "verification_status": verification_status,
+                "panel_image_url": panel_image_url,
+                "mcp_read_calls": self.mcp_read_calls,
+                "mcp_write_calls": self.mcp_write_calls,
             },
         )
         steps.append(step7)
 
         return MissionResult(
+            id=mission_id,
             show_id=show_id,
             show_name=show_name,
             client=client_name,
@@ -1018,4 +1420,13 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             verification_status=verification_status,
             steps=steps,
             callsheet_briefing=briefing_text,
+            incident_id=incident_id,
+            incident_url=incident_url,
+            incident_status=incident_status,
+            annotation_id=annotation_id,
+            deeplinks=deeplinks,
+            panel_image_url=panel_image_url,
+            time_intervention_to_resolved_seconds=time_intervention_to_resolved_seconds,
+            mcp_read_calls=self.mcp_read_calls,
+            mcp_write_calls=self.mcp_write_calls,
         )

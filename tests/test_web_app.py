@@ -56,3 +56,26 @@ async def test_scenario_injection_endpoint():
         # Restore baseline
         res_base = await client.post("/api/scenario", json={"scenario": "BASELINE"})
         assert res_base.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_mission_panel_png_endpoint():
+    """Verify mission panel png endpoint serves registered image bytes or 404."""
+    from callsheet.agent.mission import MISSION_PANEL_IMAGES
+
+    test_id = "test_mission_img_123"
+    fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest"
+    MISSION_PANEL_IMAGES[test_id] = fake_png
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # 200 for registered image
+        res = await client.get(f"/api/missions/{test_id}/panel.png")
+        assert res.status_code == 200
+        assert res.headers["content-type"] == "image/png"
+        assert res.content == fake_png
+
+        # 404 for unknown image
+        res_404 = await client.get("/api/missions/unknown_id/panel.png")
+        assert res_404.status_code == 404
+
+    MISSION_PANEL_IMAGES.pop(test_id, None)

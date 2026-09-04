@@ -26,6 +26,9 @@ def get_grafana_mcp_connection_params(
     headers: dict[str, str] = {}
     if g_url:
         headers["X-Grafana-URL"] = g_url
+    org_id = os.getenv("GRAFANA_ORG_ID", "1")
+    if org_id:
+        headers["X-Grafana-Org-Id"] = org_id
     if sa_token:
         headers["Authorization"] = f"Bearer {sa_token}"
     elif s_token:

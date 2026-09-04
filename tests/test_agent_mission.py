@@ -15,6 +15,10 @@ from callsheet.farm.emitter import FarmTelemetryEmitter
 from callsheet.farm.models import ScenarioType
 from callsheet.farm.simulator import RenderFarmSimulator
 from callsheet.interventions.dispatcher import InterventionDispatcher
+from callsheet.mcp.client import (
+    create_grafana_mcp_toolset,
+    get_grafana_mcp_connection_params,
+)
 
 load_dotenv()
 
@@ -69,6 +73,7 @@ async def test_full_six_step_mission_against_live_grafana():
     port = 8139
     server_url = f"http://127.0.0.1:{port}/mcp"
     env = os.environ.copy()
+    env["GRAFANA_ORG_ID"] = "1"
 
     cmd = [
         mcp_bin,
@@ -86,6 +91,7 @@ async def test_full_six_step_mission_against_live_grafana():
         text=True,
     )
 
+    result = None
     try:
         time.sleep(2)
         assert proc.poll() is None, "mcp-grafana failed to start"
@@ -139,6 +145,16 @@ async def test_full_six_step_mission_against_live_grafana():
         assert result.steps[6].name == "Producer Callsheet Briefing"
         assert len(result.callsheet_briefing) > 50
 
+        # Verify Section 2 Write-back artifacts and metrics
+        assert result.incident_id is not None
+        assert result.incident_status == "resolved"
+        assert result.deeplinks.get("prometheus")
+        assert result.deeplinks.get("loki")
+        assert result.deeplinks.get("tempo")
+        assert result.deeplinks.get("dashboard")
+        assert result.mcp_read_calls > 0
+        assert result.mcp_write_calls > 0
+
         # Assert no em dashes in briefing
         assert "—" not in result.callsheet_briefing, "Briefing must not contain em dashes"
 
@@ -146,6 +162,21 @@ async def test_full_six_step_mission_against_live_grafana():
         print(result.callsheet_briefing)
 
     finally:
+        # Teardown: clean up created annotation to keep Grafana stack clean
+        if result and result.annotation_id:
+            try:
+                cleanup_params = get_grafana_mcp_connection_params(mcp_server_url=server_url)
+                cleanup_toolset = create_grafana_mcp_toolset(cleanup_params)
+                await cleanup_toolset._execute_with_session(
+                    lambda session: session.call_tool("grafana_api_request", {
+                        "endpoint": f"/api/annotations/{result.annotation_id}",
+                        "method": "DELETE",
+                    }),
+                    "Delete test annotation",
+                )
+            except Exception as ex:
+                print("Note: annotation cleanup error:", ex)
+
         proc.terminate()
         try:
             proc.wait(timeout=3)
@@ -200,6 +231,7 @@ async def test_post_intervention_verification_escalation_path():
     port = 8140
     server_url = f"http://127.0.0.1:{port}/mcp"
     env = os.environ.copy()
+    env["GRAFANA_ORG_ID"] = "1"
 
     cmd = [
         mcp_bin,
@@ -211,6 +243,7 @@ async def test_post_intervention_verification_escalation_path():
 
     proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
+    result = None
     try:
         time.sleep(2)
         assert proc.poll() is None, "mcp-grafana failed to start"
@@ -252,10 +285,41 @@ async def test_post_intervention_verification_escalation_path():
         assert "HUMAN" in result.steps[5].evidence["human_recommendation"].upper()
         assert "—" not in result.callsheet_briefing
 
+        # Verify incident creation for escalation path
+        assert result.incident_id is not None
+        assert result.incident_status == "active"
+
         print("\n=== ESCALATED BRIEFING (VERIFICATION FAILURE) ===")
         print(result.callsheet_briefing)
 
     finally:
+        # Teardown: resolve incident and clean annotations so stack remains clean
+        if result:
+            cleanup_params = get_grafana_mcp_connection_params(mcp_server_url=server_url)
+            cleanup_toolset = create_grafana_mcp_toolset(cleanup_params)
+            if result.incident_id:
+                try:
+                    await cleanup_toolset._execute_with_session(
+                        lambda session: session.call_tool("update_incident", {
+                            "incidentId": str(result.incident_id),
+                            "status": "resolved",
+                        }),
+                        "Resolve escalation test incident",
+                    )
+                except Exception as ex:
+                    print("Note: incident resolve error:", ex)
+            if result.annotation_id:
+                try:
+                    await cleanup_toolset._execute_with_session(
+                        lambda session: session.call_tool("grafana_api_request", {
+                            "endpoint": f"/api/annotations/{result.annotation_id}",
+                            "method": "DELETE",
+                        }),
+                        "Delete test annotation",
+                    )
+                except Exception as ex:
+                    print("Note: annotation cleanup error:", ex)
+
         proc.terminate()
         try:
             proc.wait(timeout=3)
