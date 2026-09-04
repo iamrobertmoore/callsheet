@@ -76,6 +76,7 @@ async def health_check():
         "service": "callsheet",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "worker_running": worker._running,
+        "tick_cadence": worker.tick_cadence_stats,
     }
 
 

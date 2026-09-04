@@ -15,13 +15,13 @@ from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk._logs.export import SimpleLogRecordProcessor
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from callsheet.farm.models import FarmState, NodeStatus, ScenarioType
 from callsheet.farm.simulator import RenderFarmSimulator
@@ -125,17 +125,21 @@ class FarmTelemetryEmitter:
     def _init_logs(self) -> None:
         self.log_exporter = OTLPLogExporter()
         self.logger_provider = LoggerProvider(resource=self.resource)
-        self.logger_provider.add_log_record_processor(
-            SimpleLogRecordProcessor(self.log_exporter)
+        self.log_processor = BatchLogRecordProcessor(
+            self.log_exporter,
+            schedule_delay_millis=2000,
         )
+        self.logger_provider.add_log_record_processor(self.log_processor)
         self.otlp_logger = self.logger_provider.get_logger("render-farm-logger", "0.1.0")
 
     def _init_traces(self) -> None:
         self.trace_exporter = OTLPSpanExporter()
         self.tracer_provider = TracerProvider(resource=self.resource)
-        self.tracer_provider.add_span_processor(
-            SimpleSpanProcessor(self.trace_exporter)
+        self.span_processor = BatchSpanProcessor(
+            self.trace_exporter,
+            schedule_delay_millis=2000,
         )
+        self.tracer_provider.add_span_processor(self.span_processor)
         self.tracer = self.tracer_provider.get_tracer("render-farm-tracer", "0.1.0")
 
     def emit_metrics_tick(self) -> None:
@@ -208,9 +212,6 @@ class FarmTelemetryEmitter:
 
             self.gauge_shot_progress.set(shot.progress_ratio, shot_labels)
             self.gauge_shot_margin.set(round(margin_hours, 2), shot_labels)
-
-        # Force flush metrics to exporter
-        self.metric_reader.force_flush()
 
     def emit_log(
         self,
@@ -428,3 +429,21 @@ class FarmTelemetryEmitter:
                     shot_code=shot_code,
                     show_id=show_id,
                 )
+
+    def shutdown(self) -> None:
+        """Flushes and shuts down all telemetry providers cleanly on shutdown."""
+        if getattr(self, "_is_shutdown", False):
+            return
+        self._is_shutdown = True
+        try:
+            self.logger_provider.shutdown()
+        except Exception as e:
+            logger.warning("Error shutting down logger provider: %s", e)
+        try:
+            self.tracer_provider.shutdown()
+        except Exception as e:
+            logger.warning("Error shutting down tracer provider: %s", e)
+        try:
+            self.metric_reader.shutdown()
+        except Exception as e:
+            logger.warning("Error shutting down metric reader: %s", e)

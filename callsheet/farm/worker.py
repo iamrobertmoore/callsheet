@@ -128,7 +128,7 @@ class FarmWorker:
             "last_interval_seconds": intervals[-1] if intervals else None,
             "average_interval_seconds": round(sum(intervals) / len(intervals), 2) if intervals else None,
             "last_duration_seconds": durations[-1] if durations else None,
-            "average_duration_seconds": round(sum(durations) / len(durations), 2) if durations else None,
+            "average_duration_seconds": round(sum(durations) / len(durations), 4) if durations else None,
             "is_investigating": self.is_investigating,
             "recent_ticks": self.tick_cadence_history[-5:],
         }
@@ -158,6 +158,7 @@ class FarmWorker:
             except asyncio.CancelledError:
                 pass
             self._mission_task = None
+        self.emitter.shutdown()
         logger.info("Farm continuous worker stopped.")
 
     async def _run_loop(self) -> None:
@@ -181,8 +182,9 @@ class FarmWorker:
                     self.simulator.reset_cycle()
                     self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
 
-                # 1. Advance simulation state
-                events = self.simulator.tick(delta_seconds=self.tick_interval_seconds)
+                # 1. Advance simulation state tracking wall time (capped at 30 seconds)
+                delta_sec = min(30.0, max(0.1, interval)) if interval is not None else self.tick_interval_seconds
+                events = self.simulator.tick(delta_seconds=delta_sec)
 
                 # 2. Transmit metrics tick
                 self.emitter.emit_metrics_tick()
@@ -202,7 +204,7 @@ class FarmWorker:
             cadence_entry = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "interval_seconds": round(interval, 2) if interval is not None else None,
-                "duration_seconds": round(duration, 2),
+                "duration_seconds": round(duration, 4),
                 "is_investigating": self.is_investigating,
             }
             self.tick_cadence_history.append(cadence_entry)
@@ -210,13 +212,14 @@ class FarmWorker:
                 self.tick_cadence_history.pop(0)
 
             logger.info(
-                "Worker tick completed in %.2fs (interval: %s, investigating: %s)",
+                "Worker tick completed in %.4fs (interval: %s, investigating: %s)",
                 duration,
                 f"{interval:.2f}s" if interval is not None else "initial",
                 self.is_investigating,
             )
 
-            await asyncio.sleep(self.tick_interval_seconds)
+            sleep_time = max(0.0, self.tick_interval_seconds - duration)
+            await asyncio.sleep(sleep_time)
 
     async def _check_and_trigger_autonomous_mission(self) -> None:
         """
