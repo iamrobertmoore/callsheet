@@ -3,6 +3,7 @@ Tests for Callsheet Multi-Step Mission Runner, Grafana Cloud MCP data-driven rea
 and failure modes when Grafana is unreachable.
 """
 
+import asyncio
 import os
 import subprocess
 import time
@@ -97,7 +98,26 @@ async def test_full_six_step_mission_against_live_grafana():
             model_name="gemini-3.6-flash",
         )
 
-        result = await runner.execute_mission(show_id="show-aethelgard")
+        async def bg_ticker():
+            try:
+                while True:
+                    await asyncio.sleep(3.0)
+                    events = sim.tick(delta_seconds=3.0)
+                    emitter.emit_metrics_tick()
+                    if events:
+                        emitter.process_events(events)
+                    emitter.metric_reader.force_flush()
+                    emitter.logger_provider.force_flush()
+                    emitter.tracer_provider.force_flush()
+            except asyncio.CancelledError:
+                pass
+
+        tick_task = asyncio.create_task(bg_ticker())
+        try:
+            result = await runner.execute_mission(show_id="show-aethelgard")
+        finally:
+            tick_task.cancel()
+            await asyncio.gather(tick_task, return_exceptions=True)
 
         # Verify mission structure and genuine data extraction
         assert result.show_id == "show-aethelgard"
@@ -204,7 +224,26 @@ async def test_post_intervention_verification_escalation_path():
         )
 
         # Force verification fault
-        result = await runner.execute_mission(show_id="show-aethelgard", force_verification_fault=True)
+        async def bg_ticker():
+            try:
+                while True:
+                    await asyncio.sleep(3.0)
+                    events = sim.tick(delta_seconds=3.0)
+                    emitter.emit_metrics_tick()
+                    if events:
+                        emitter.process_events(events)
+                    emitter.metric_reader.force_flush()
+                    emitter.logger_provider.force_flush()
+                    emitter.tracer_provider.force_flush()
+            except asyncio.CancelledError:
+                pass
+
+        tick_task = asyncio.create_task(bg_ticker())
+        try:
+            result = await runner.execute_mission(show_id="show-aethelgard", force_verification_fault=True)
+        finally:
+            tick_task.cancel()
+            await asyncio.gather(tick_task, return_exceptions=True)
 
         assert len(result.steps) == 7
         assert result.verification_status == "ESCALATED"

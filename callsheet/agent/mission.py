@@ -5,6 +5,7 @@ Executes genuine, load-bearing observability investigations against Grafana Clou
 intervention summaries using Vertex AI Gemini.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 import logging
@@ -61,6 +62,45 @@ class MissionResult(BaseModel):
     callsheet_briefing: str = ""
 
 
+def parse_loki_timestamp(ts_raw: Any) -> Optional[float]:
+    """
+    Parses a Loki log timestamp into float unix epoch seconds.
+    Loki timestamps can be string nanoseconds, int nanoseconds, or ISO strings.
+    """
+    if not ts_raw:
+        return None
+    if isinstance(ts_raw, (int, float)):
+        val = float(ts_raw)
+        return val / 1e9 if val > 1e11 else val
+    ts_str = str(ts_raw).strip('"').strip("'").strip()
+    if not ts_str:
+        return None
+    try:
+        val = float(ts_str)
+        return val / 1e9 if val > 1e11 else val
+    except ValueError:
+        pass
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
+def parse_loki_frame_duration(line: str) -> Optional[float]:
+    """
+    Extracts frame duration in seconds from standard or degraded Loki log lines.
+    Handles 'rendered on <node> successfully in <dur>s' and 'DEGRADED PERFORMANCE (<dur>s)'.
+    """
+    m = re.search(r"(?:in\s+|DEGRADED PERFORMANCE\s*\()([0-9]+(?:\.[0-9]+)?)\s*s", line)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 class MultiStepMissionRunner:
     """
     Executes load-bearing multi-step observability investigations across Prometheus, Loki,
@@ -81,6 +121,11 @@ class MultiStepMissionRunner:
         self.project_id = project_id
         self.location = location
         self.model_name = model_name
+
+        self.verification_progress: Optional[Dict[str, Any]] = None
+        self.progress_callback: Optional[Any] = None
+        self.max_poll_seconds: float = 150.0
+        self.poll_interval_seconds: float = 5.0
 
         self.genai_client = Client(
             vertexai=True,
@@ -114,7 +159,13 @@ class MultiStepMissionRunner:
 
         return {}
 
-    async def execute_mission(self, show_id: str = "show-aethelgard", force_verification_fault: bool = False) -> MissionResult:
+    async def execute_mission(
+        self,
+        show_id: str = "show-aethelgard",
+        force_verification_fault: bool = False,
+        poll_interval_seconds: Optional[float] = None,
+        max_poll_seconds: Optional[float] = None,
+    ) -> MissionResult:
         """
         Runs the complete 7-step closed-loop mission strictly driven by Grafana Cloud MCP responses:
         1. Anomaly Detection (Prometheus response parsing) - DETERMINISTIC_TELEMETRY
@@ -509,6 +560,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "quoted_loki_log": quoted_log_evidence,
                 "quoted_tempo_trace": quoted_trace_evidence,
             },
+            force_fault=force_verification_fault,
         )
 
         # ---------------------------------------------------------
@@ -563,83 +615,220 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
 
         # ---------------------------------------------------------
         # STEP 6: POST-INTERVENTION TELEMETRY VERIFICATION (Grafana Cloud)
-        # Closed-loop verification: Query Grafana telemetry on target node to prove remediation worked.
+        # Closed-loop verification: Poll Grafana telemetry for up to 150 seconds.
+        # Accept telemetry witnesses strictly timestamped after intervention_ts.
+        # Zero synthesized or fallback values permitted.
         # ---------------------------------------------------------
-        if force_verification_fault:
-            # Testable failure path: simulate failover node stall / failure
-            verified_rate_sec = throttled_sec
-            verified_temp_c = 94.8
-            verified_log_line = f"CRITICAL: Thermal junction temperature on {chosen_standby_node} reached {verified_temp_c:.1f}C. Hardware clock down-throttled to 800MHz."
-            is_verified = False
-            verification_status = "ESCALATED"
-            intervention_record.status = "ESCALATED"
-            escalation_required = True
-            human_recommendation = (
-                f"IMMEDIATE HUMAN ACTION REQUIRED: Failover standby node {chosen_standby_node} failed post-intervention verification "
-                f"with degraded throughput ({verified_rate_sec:.0f}s/frame). Manually allocate external cloud burst capacity to protect delivery."
-            )
-            step6_desc = (
-                f"Closed-loop telemetry verification for {chosen_standby_node} FAILED. Retrieved frame duration {verified_rate_sec:.0f}s "
-                f"(unrecovered vs {normal_sec:.0f}s baseline, temp {verified_temp_c:.1f}°C). Remediation did not recover delivery schedule. "
-                f"Status set to ESCALATED: IMMEDIATE HUMAN TD ACTION REQUIRED."
-            )
-        else:
-            # Closed-loop verification: Retrieve real telemetry for target standby node
-            target_prom_temp = None
-            try:
-                target_prom_res = await self._execute_mcp_tool(
-                    toolset,
-                    "query_prometheus",
-                    {"query": f'render_farm_node_temperature_celsius{{node_id="{chosen_standby_node}"}}'},
-                )
-                t_series = target_prom_res.get("data", {}).get("result", [])
-                if t_series:
-                    target_prom_temp = float(t_series[0].get("value", [0, 0])[1])
-            except Exception as e:
-                logger.warning("Prometheus verification query failed: %s", e)
+        intervention_ts = intervention_record.timestamp
+        intervention_epoch = intervention_ts.timestamp()
+        rate_limit_seconds = normal_sec * 1.25
 
-            if target_prom_temp is None:
-                target_node_obj = self.dispatcher.simulator.state.nodes.get(chosen_standby_node)
-                target_prom_temp = target_node_obj.temperature_celsius if target_node_obj else 62.0
+        window_start_time = time.time()
+        effective_max_poll = max_poll_seconds if max_poll_seconds is not None else self.max_poll_seconds
+        effective_interval = poll_interval_seconds if poll_interval_seconds is not None else self.poll_interval_seconds
 
-            target_loki_log = None
+        verified_rate_sec: Optional[float] = None
+        verified_temp_c: Optional[float] = None
+        verified_log_line: Optional[str] = None
+        accepted_loki_ts: Optional[float] = None
+        accepted_prom_ts: Optional[float] = None
+        accepted_tempo_trace_id: Optional[str] = None
+        tempo_raytrace_duration_s: Optional[float] = None
+
+        witnesses_accepted: List[str] = []
+        is_verified = False
+        verification_status = "PENDING_VERIFICATION"
+        escalation_required = False
+        human_recommendation = ""
+        poll_attempts = 0
+
+        while (time.time() - window_start_time) <= effective_max_poll:
+            poll_attempts += 1
+            elapsed = int(time.time() - window_start_time)
+            progress_msg = f"Awaiting first frame on {chosen_standby_node}. Verification window 150s, {elapsed}s elapsed."
+            self.verification_progress = {
+                "active": True,
+                "target_node": chosen_standby_node,
+                "elapsed_seconds": elapsed,
+                "max_window_seconds": 150,
+                "message": progress_msg,
+            }
+            if self.progress_callback:
+                try:
+                    self.progress_callback(self.verification_progress)
+                except Exception:
+                    pass
+
+            # 1. Query Loki for frame completion lines on chosen_standby_node
+            latest_loki_entry = None
             try:
-                target_loki_res = await self._execute_mcp_tool(
+                loki_res = await self._execute_mcp_tool(
                     toolset,
                     "query_loki_logs",
                     {
                         "datasourceUid": "grafanacloud-logs",
-                        "logql": f'{{service_name="render-farm"}} |= "{chosen_standby_node}"',
-                        "startRfc3339": "now-10m",
+                        "logql": f'{{service_name="render-farm"}} |= "rendered on {chosen_standby_node}"',
+                        "startRfc3339": "now-5m",
                         "endRfc3339": "now",
                         "limit": 10,
                     },
                 )
-                t_logs = [entry.get("line", "") for entry in target_loki_res.get("data", [])]
-                for tl in t_logs:
-                    if "rendered on" in tl:
-                        target_loki_log = tl
+                entries = loki_res.get("data", []) if isinstance(loki_res, dict) else []
+                for entry in entries:
+                    line_content = entry.get("line", "")
+                    raw_ts = entry.get("timestamp") or entry.get("labels", {}).get("observed_timestamp")
+                    parsed_ts = parse_loki_timestamp(raw_ts)
+                    if parsed_ts is not None and parsed_ts >= (intervention_epoch - 0.5):
+                        dur = parse_loki_frame_duration(line_content)
+                        if dur is not None:
+                            latest_loki_entry = (line_content, dur, parsed_ts)
+                            break
+            except Exception as e:
+                logger.warning("Loki verification poll failed on attempt %d: %s", poll_attempts, e)
+
+            # 2. Query Prometheus instant temperature metric on chosen_standby_node
+            latest_prom_entry = None
+            try:
+                prom_res = await self._execute_mcp_tool(
+                    toolset,
+                    "query_prometheus",
+                    {
+                        "datasourceUid": "grafanacloud-prom",
+                        "expr": f'render_farm_node_temperature_celsius{{node_id="{chosen_standby_node}"}}',
+                        "queryType": "instant",
+                        "endTime": "now",
+                    },
+                )
+                series_data = prom_res.get("data", [])
+                if isinstance(series_data, dict):
+                    series_data = series_data.get("result", [])
+                for s in series_data:
+                    val = s.get("value", [])
+                    if len(val) >= 2:
+                        p_ts = float(val[0])
+                        p_temp = float(val[1])
+                        if p_ts >= (intervention_epoch - 2.0):
+                            latest_prom_entry = (p_temp, p_ts)
+                            break
+            except Exception as e:
+                logger.warning("Prometheus verification poll failed on attempt %d: %s", poll_attempts, e)
+
+            # 3. Query Tempo for traces on chosen_standby_node (third witness)
+            latest_tempo_entry = None
+            try:
+                now_epoch = int(time.time())
+                start_epoch = max(0, int(intervention_epoch) - 5)
+                tempo_search = await self._execute_mcp_tool(
+                    toolset,
+                    "grafana_api_request",
+                    {
+                        "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/search?tags=node_id%3D{chosen_standby_node}&start={start_epoch}&end={now_epoch}&limit=5",
+                        "method": "GET",
+                    },
+                )
+                t_list = tempo_search.get("data", {}).get("traces", [])
+                if not t_list and "traces" in tempo_search:
+                    t_list = tempo_search.get("traces", [])
+                for tr in t_list:
+                    tr_start_ns = int(tr.get("startTimeUnixNano", 0))
+                    tr_start_epoch = tr_start_ns / 1e9 if tr_start_ns > 0 else 0.0
+                    if tr_start_epoch >= (intervention_epoch - 2.0):
+                        t_id = str(tr.get("traceID", "")).lower().zfill(32)
+                        latest_tempo_entry = (t_id, tr_start_epoch)
                         break
             except Exception as e:
-                logger.warning("Loki verification query failed: %s", e)
+                logger.warning("Tempo verification poll failed on attempt %d: %s", poll_attempts, e)
 
-            if not target_loki_log:
-                target_loki_log = f"Frame {target_shot.completed_frames + 1} rendered on {chosen_standby_node} successfully in {normal_sec:.1f}s."
+            # Check if Loki and Prometheus samples are both retrieved
+            if latest_loki_entry is not None and latest_prom_entry is not None:
+                verified_log_line, verified_rate_sec, accepted_loki_ts = latest_loki_entry
+                verified_temp_c = round(latest_prom_entry[0], 1)
+                accepted_prom_ts = latest_prom_entry[1]
 
-            verified_rate_sec = normal_sec
-            verified_temp_c = round(target_prom_temp, 1)
-            verified_log_line = target_loki_log
-            speedup_factor = throttled_sec / normal_sec if normal_sec > 0 else 1.0
-            is_verified = True
-            verification_status = "VERIFIED_PROTECTED"
-            intervention_record.status = "PROTECTED"
-            escalation_required = False
-            human_recommendation = "None. Workload successfully secured and verified on standby infrastructure."
+                witnesses_accepted = ["Loki", "Prometheus"]
+                if latest_tempo_entry is not None:
+                    accepted_tempo_trace_id = latest_tempo_entry[0]
+                    witnesses_accepted.append("Tempo")
+                    try:
+                        trace_detail = await self._execute_mcp_tool(
+                            toolset,
+                            "grafana_api_request",
+                            {
+                                "endpoint": f"/api/datasources/proxy/uid/grafanacloud-traces/api/traces/{accepted_tempo_trace_id}",
+                                "method": "GET",
+                            },
+                        )
+                        batches = trace_detail.get("data", {}).get("batches", [])
+                        for b in batches:
+                            for scope in b.get("scopeSpans", []):
+                                for sp in scope.get("spans", []):
+                                    if sp.get("name") == "raytrace_volumetrics_pass":
+                                        st_ns = int(sp.get("startTimeUnixNano", 0))
+                                        et_ns = int(sp.get("endTimeUnixNano", 0))
+                                        if et_ns > st_ns:
+                                            tempo_raytrace_duration_s = round((et_ns - st_ns) / 1e9, 2)
+                    except Exception as te:
+                        logger.warning("Failed to fetch Tempo trace details for %s: %s", accepted_tempo_trace_id, te)
+
+                # Evaluate pass or fail criteria
+                if verified_rate_sec <= rate_limit_seconds and verified_temp_c < 90.0:
+                    is_verified = True
+                    verification_status = "VERIFIED_PROTECTED"
+                    intervention_record.status = "PROTECTED"
+                    escalation_required = False
+                    human_recommendation = "None. Workload successfully secured and verified on standby infrastructure."
+                    break
+                else:
+                    is_verified = False
+                    verification_status = "ESCALATED"
+                    intervention_record.status = "ESCALATED"
+                    escalation_required = True
+                    human_recommendation = (
+                        f"IMMEDIATE HUMAN ACTION REQUIRED: Failover standby node {chosen_standby_node} failed post-intervention verification "
+                        f"with degraded throughput ({verified_rate_sec:.1f}s/frame, temp {verified_temp_c:.1f}°C). "
+                        f"Manually allocate external cloud burst capacity to protect delivery."
+                    )
+                    break
+
+            if (time.time() - window_start_time) < effective_max_poll:
+                await asyncio.sleep(effective_interval)
+
+        # Clear active progress
+        self.verification_progress = None
+
+        # Check if window expired without definitive telemetry proof
+        if verification_status == "PENDING_VERIFICATION":
+            verification_status = "VERIFICATION_INCONCLUSIVE"
+            intervention_record.status = "PENDING_VERIFICATION"
+            is_verified = False
+            escalation_required = True
+            human_recommendation = (
+                f"MANUAL INVESTIGATION REQUIRED: 150-second verification window expired without post-intervention telemetry from {chosen_standby_node}. "
+                f"Technical Director review required to confirm render progress."
+            )
+
+        # Formulate Step 6 description based on true verified outcome
+        elapsed_total = round(time.time() - window_start_time, 1)
+        if verification_status == "VERIFIED_PROTECTED":
             step6_desc = (
-                f"Closed-loop verification confirmed via Grafana Cloud telemetry for {chosen_standby_node}. "
-                f"Retrieved frame render duration {verified_rate_sec:.0f}s (nominal baseline {normal_sec:.0f}s) "
-                f"and stable junction temperature ({verified_temp_c:.1f}°C). Throughput recovered by {speedup_factor:.1f}x. "
+                f"Closed-loop verification confirmed via Grafana Cloud telemetry for {chosen_standby_node} in {elapsed_total}s. "
+                f"Retrieved frame render duration {verified_rate_sec:.1f}s (nominal baseline {normal_sec:.0f}s, threshold {rate_limit_seconds:.1f}s) "
+                f"and stable junction temperature ({verified_temp_c:.1f}°C). Telemetry timestamped after intervention ({intervention_ts.isoformat()}). "
+                f"Witnesses accepted: {', '.join(witnesses_accepted)}. "
                 f"Delivery deadline confirmed PROTECTED with +{intervention_record.buffer_margin_hours:.1f}h buffer margin."
+            )
+        elif verification_status == "ESCALATED":
+            step6_desc = (
+                f"Closed-loop telemetry verification for {chosen_standby_node} FAILED in {elapsed_total}s. "
+                f"Retrieved frame duration {verified_rate_sec:.1f}s (exceeds {rate_limit_seconds:.1f}s limit) "
+                f"and elevated temperature ({verified_temp_c:.1f}°C). Witnesses accepted: {', '.join(witnesses_accepted)}. "
+                f"Status set to ESCALATED: IMMEDIATE HUMAN TD ACTION REQUIRED."
+            )
+        else:
+            step6_desc = (
+                f"Closed-loop telemetry verification for {chosen_standby_node} INCONCLUSIVE. "
+                f"150-second polling window expired without post-intervention frame completion logs or metrics. "
+                f"Intervention status left at PENDING_VERIFICATION. Immediate Technical Director investigation required."
             )
 
         step6 = MissionStep(
@@ -649,14 +838,24 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             description=step6_desc,
             evidence={
                 "target_node": chosen_standby_node,
-                "verified_frame_duration_seconds": verified_rate_sec,
+                "intervention_ts": intervention_ts.isoformat(),
+                "intervention_epoch": intervention_epoch,
                 "baseline_seconds": normal_sec,
+                "threshold_seconds": round(rate_limit_seconds, 2),
+                "verified_frame_duration_seconds": verified_rate_sec,
                 "target_temperature_celsius": verified_temp_c,
-                "speedup_factor": round(throttled_sec / verified_rate_sec, 1) if verified_rate_sec > 0 else 1.0,
+                "speedup_factor": round(throttled_sec / verified_rate_sec, 1) if verified_rate_sec and verified_rate_sec > 0 else 1.0,
                 "verification_passed": is_verified,
                 "quoted_loki_log": verified_log_line,
+                "loki_timestamp": accepted_loki_ts,
+                "prometheus_sample_timestamp": accepted_prom_ts,
+                "tempo_trace_id": accepted_tempo_trace_id,
+                "tempo_raytrace_duration_seconds": tempo_raytrace_duration_s,
+                "witnesses_accepted": witnesses_accepted,
                 "verification_status": verification_status,
                 "human_recommendation": human_recommendation,
+                "poll_attempts": poll_attempts,
+                "elapsed_seconds": elapsed_total,
             },
         )
         steps.append(step6)
@@ -698,9 +897,9 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             frames_remaining=frames_rem,
             verification_status=verification_status,
             verification_target_node=chosen_standby_node,
-            verification_rate=f"{verified_rate_sec:.0f}s",
-            verification_temp=f"{verified_temp_c:.1f}°C",
-            verification_log=verified_log_line,
+            verification_rate=f"{verified_rate_sec:.1f}s" if verified_rate_sec is not None else "Unverified (no frame in window)",
+            verification_temp=f"{verified_temp_c:.1f}°C" if verified_temp_c is not None else "Unverified",
+            verification_log=verified_log_line or "None (No post-intervention frame logged within 150s window)",
             escalation_required=str(escalation_required),
             human_recommendation=human_recommendation,
         )

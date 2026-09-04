@@ -57,6 +57,7 @@ class Shot(BaseModel):
     status: ShotStatus = ShotStatus.QUEUED
     priority: int = 5
     assigned_at: Optional[datetime] = None
+    render_progress_seconds: float = 0.0
 
     @property
     def frames_remaining(self) -> int:

@@ -213,6 +213,7 @@ class RenderFarmSimulator:
         shot_id: str,
         target_node_id: str,
         source_temp: Optional[float] = None,
+        force_fault: bool = False,
     ) -> dict:
         """
         Intervention action: moves a shot from a degraded node to a target node (e.g. standby node-11).
@@ -239,15 +240,21 @@ class RenderFarmSimulator:
 
         # Assign to target node
         shot.allocated_node_id = target_node_id
-        shot.current_seconds_per_frame = shot.estimated_seconds_per_frame  # Normal speed restored
         shot.status = ShotStatus.RENDERING
-        
-        target_node.status = NodeStatus.HEALTHY
+        shot.render_progress_seconds = 0.0
         target_node.is_standby = False
         target_node.current_shot_id = shot_id
         target_node.current_frame = 1000 + shot.completed_frames + 1
         target_node.cpu_utilization = round(random.uniform(82.0, 91.0), 1)
-        target_node.temperature_celsius = round(random.uniform(60.0, 66.0), 1)
+
+        if force_fault:
+            target_node.status = NodeStatus.THROTTLED
+            target_node.temperature_celsius = 94.8
+            shot.current_seconds_per_frame = 40.0  # Degraded render rate
+        else:
+            target_node.status = NodeStatus.HEALTHY
+            target_node.temperature_celsius = round(random.uniform(60.0, 66.0), 1)
+            shot.current_seconds_per_frame = shot.estimated_seconds_per_frame  # Normal speed restored
 
         # Calculate time saved relative to simulation clock
         sim_now = self.state.last_updated or datetime.now(timezone.utc)
@@ -292,11 +299,15 @@ class RenderFarmSimulator:
             if node.status == NodeStatus.HEALTHY:
                 node.temperature_celsius = max(52.0, min(72.0, node.temperature_celsius + random.uniform(-0.5, 0.5)))
 
-            # Advance frame render based on seconds_per_frame
-            prob_complete = delta_seconds / max(1.0, shot.current_seconds_per_frame)
-            if random.random() < prob_complete and shot.completed_frames < shot.total_frames:
-                shot.completed_frames += 1
-                node.frames_completed_total += 1
+            # Advance frame render based on seconds_per_frame using progress accumulation
+            shot.render_progress_seconds += delta_seconds
+            rate = max(1.0, shot.current_seconds_per_frame)
+            frames_to_complete = int(shot.render_progress_seconds // rate)
+            if frames_to_complete > 0 and shot.completed_frames < shot.total_frames:
+                actual_completed = min(frames_to_complete, shot.total_frames - shot.completed_frames)
+                shot.render_progress_seconds -= (actual_completed * rate)
+                shot.completed_frames += actual_completed
+                node.frames_completed_total += actual_completed
                 current_frame = 1000 + shot.completed_frames
                 node.current_frame = current_frame
 

@@ -106,6 +106,13 @@ class FarmWorker:
         self._last_investigated_node: Optional[str] = None
         self._last_cycle_epoch: Optional[int] = None
 
+    @property
+    def verification_progress(self) -> Optional[Dict[str, Any]]:
+        """Surfaces live verification progress from mission runner if active."""
+        if self.mission_runner:
+            return getattr(self.mission_runner, "verification_progress", None)
+        return None
+
     async def start(self) -> None:
         """Starts the continuous emission and autonomous watchdog loop."""
         if self._running:
@@ -164,13 +171,13 @@ class FarmWorker:
     async def _check_and_trigger_autonomous_mission(self) -> None:
         """
         Watches for degraded nodes crossing thermal or failure limits.
-        When detected, automatically triggers the 6-step mission without user intervention.
+        When detected, automatically triggers the 7-step mission without user intervention.
         The last successful mission persists on screen until a new one replaces it.
         """
         if not self.mission_runner or self.is_investigating:
             return
 
-        # Check if any node is degraded / overheated
+        # Check if any node is degraded or overheated
         overheated_nodes = [
             n for n in self.simulator.state.nodes.values()
             if n.temperature_celsius > n.thermal_limit_celsius or n.status == NodeStatus.THROTTLED
@@ -180,23 +187,26 @@ class FarmWorker:
             target_node = overheated_nodes[0]
             if self._last_investigated_node != target_node.id:
                 logger.info(
-                    "Autonomous watchdog detected anomaly on %s (%.1f°C). Running 6-step mission...",
+                    "Autonomous watchdog detected anomaly on %s (%.1f°C). Running 7-step mission...",
                     target_node.id,
                     target_node.temperature_celsius,
                 )
                 self.is_investigating = True
-                try:
-                    # Allow 8 seconds for telemetry to be written and indexed in Grafana Cloud
-                    await asyncio.sleep(8.0)
-                    res = await self.mission_runner.execute_mission(show_id="show-aethelgard")
-                    # Atomically update latest_mission
-                    self.latest_mission = res.model_dump(mode="json")
-                    self._last_investigated_node = target_node.id
-                    logger.info("Autonomous mission completed successfully for %s", target_node.id)
-                except Exception as ex:
-                    logger.error("Autonomous mission execution failed: %s", ex, exc_info=True)
-                finally:
-                    self.is_investigating = False
+                self._last_investigated_node = target_node.id
+                asyncio.create_task(self._run_autonomous_mission(target_node.id))
+
+    async def _run_autonomous_mission(self, target_node_id: str) -> None:
+        try:
+            # Allow 8 seconds for telemetry to be written and indexed in Grafana Cloud
+            await asyncio.sleep(8.0)
+            res = await self.mission_runner.execute_mission(show_id="show-aethelgard")
+            # Atomically update latest_mission
+            self.latest_mission = res.model_dump(mode="json")
+            logger.info("Autonomous mission completed successfully for %s", target_node_id)
+        except Exception as ex:
+            logger.error("Autonomous mission execution failed: %s", ex, exc_info=True)
+        finally:
+            self.is_investigating = False
 
     def inject_scenario(self, scenario: ScenarioType) -> None:
         """Injects a scenario into the running simulator (used by /demo or filming)."""

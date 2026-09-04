@@ -92,6 +92,7 @@ async def get_farm_state():
         "latest_mission": worker.latest_mission,
         "is_investigating": worker.is_investigating,
         "interventions_count": len(dispatcher.history),
+        "verification_progress": worker.verification_progress,
     }
     return JSONResponse(
         content=content,
@@ -714,6 +715,18 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             background: var(--state-healthy-wash);
         }
 
+        .tag-slipping {
+            color: var(--heat-warm);
+            border: 1px solid rgba(245, 158, 11, 0.35);
+            background: rgba(245, 158, 11, 0.09);
+        }
+
+        .tag-critical {
+            color: var(--heat-fault);
+            border: 1px solid rgba(248, 113, 113, 0.35);
+            background: rgba(248, 113, 113, 0.09);
+        }
+
         .slate-metrics {
             display: flex;
             flex-direction: column;
@@ -1320,13 +1333,15 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 const data = await res.json();
 
                 const statusText = document.getElementById('agent-status-text');
-                if (data.is_investigating) {
+                if (data.verification_progress && data.verification_progress.active) {
+                    statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> ' + data.verification_progress.message;
+                } else if (data.is_investigating) {
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)';
                 } else {
                     statusText.innerHTML = '<span class="status-pip"></span> AUTONOMOUS WATCH ACTIVE';
                 }
 
-                renderSlate(data.shows, data.latest_mission);
+                renderSlate(data.shows, data.latest_mission, data.verification_progress);
 
                 if (data.latest_mission) {
                     renderBriefing(data.latest_mission);
@@ -1340,7 +1355,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        function renderSlate(shows, latestMission) {
+        function renderSlate(shows, latestMission, verificationProgress) {
             const container = document.getElementById('slate-container');
             const showList = Object.values(shows);
             if (!showList.length) return;
@@ -1352,8 +1367,17 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 let bufferMargin = '+5.5 hours';
 
                 if (s.id === 'show-aethelgard') {
-                    if (isIntervened) {
-                        statusTag = '<span class="state-tag tag-protected">PROTECTED</span>';
+                    if (verificationProgress && verificationProgress.active) {
+                        statusTag = '<span class="state-tag tag-slipping">VERIFYING (' + verificationProgress.elapsed_seconds + 's)</span>';
+                        bufferMargin = 'Verifying';
+                    } else if (isIntervened) {
+                        if (latestMission.verification_status === 'ESCALATED') {
+                            statusTag = '<span class="state-tag tag-critical">ESCALATED</span>';
+                        } else if (latestMission.verification_status === 'VERIFICATION_INCONCLUSIVE') {
+                            statusTag = '<span class="state-tag tag-slipping">INCONCLUSIVE</span>';
+                        } else {
+                            statusTag = '<span class="state-tag tag-protected">VERIFIED PROTECTED</span>';
+                        }
                         bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.8).toFixed(1) + ' hours';
                     } else {
                         bufferMargin = '+2.8 hours';

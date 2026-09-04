@@ -69,6 +69,7 @@ CRITICAL ACCURACY RULES:
 - TEMPERATURE CONSISTENCY: State the junction temperature on {anomalous_node_id} strictly as {hardware_temp}. Do NOT mention 'peak' or invent secondary temperature numbers.
 - Quote the EXACT completion times ({unmitigated_completion} unmitigated vs {restored_completion} restored) and buffer margins ({unmitigated_buffer} deficit vs {restored_buffer} protected). Do NOT invent arbitrary timestamps.
 - If Verification Status is 'ESCALATED', the headline must state 'DELIVERY DEADLINE ESCALATION' and the executive summary must provide the explicit human recommendation ({human_recommendation}).
+- If Verification Status is 'VERIFICATION_INCONCLUSIVE', the headline must state 'DELIVERY DEADLINE VERIFICATION INCONCLUSIVE' and the executive summary must explain that the 150s verification window expired without post-intervention telemetry proof, leaving the incident open for Technical Director investigation.
 - Never use em dashes anywhere. Use colons, parentheses, or periods.
 - Never use emojis anywhere.
 
