@@ -185,7 +185,8 @@ class RenderFarmSimulator:
 
             # Re-arm standby nodes to ensure spare capacity is available for scenario demo
             for n_id, n in self.state.nodes.items():
-                if n.is_standby:
+                if n.is_standby or n_id in ["node-11", "node-12"]:
+                    n.is_standby = True
                     n.status = NodeStatus.STANDBY
                     n.temperature_celsius = 42.0
                     n.current_shot_id = None
