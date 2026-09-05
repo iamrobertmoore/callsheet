@@ -167,6 +167,8 @@ class MultiStepMissionRunner:
         self.dashboard_uid = os.getenv("GRAFANA_FARM_DASHBOARD_UID", "callsheet-control-tower")
         self.mcp_read_calls = 0
         self.mcp_write_calls = 0
+        self.instance_mcp_read_calls = 0
+        self.instance_mcp_write_calls = 0
         self.mission_mcp_read_calls = 0
         self.mission_mcp_write_calls = 0
 
@@ -195,9 +197,11 @@ class MultiStepMissionRunner:
         }
         if tool_name in WRITE_TOOLS:
             self.mcp_write_calls += 1
+            self.instance_mcp_write_calls += 1
             self.mission_mcp_write_calls += 1
         else:
             self.mcp_read_calls += 1
+            self.instance_mcp_read_calls += 1
             self.mission_mcp_read_calls += 1
 
         try:
@@ -422,7 +426,7 @@ class MultiStepMissionRunner:
                 rule_uid = PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else "cfxbt56wwbocge"
                 rule_info = await get_alert_rule(toolset, rule_uid)
                 self.mission_mcp_read_calls += 1
-                self.instance_mcp_read_calls += 1
+                self.mcp_read_calls += 1
                 if rule_info:
                     alerts = rule_info.get("alerts", [])
                     active_alert = next((a for a in alerts if a.get("state") == "Alerting"), None)
@@ -1186,7 +1190,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                     rule_uid = PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else "cfxbt56wwbocge"
                     r_info = await get_alert_rule(toolset, rule_uid)
                     self.mission_mcp_read_calls += 1
-                    self.instance_mcp_read_calls += 1
+                    self.mcp_read_calls += 1
                     if not is_node_alerting(r_info, anomalous_node_id):
                         now_clear = datetime.now(timezone.utc)
                         alert_resolved_at = now_clear.isoformat()
@@ -1307,7 +1311,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 try:
                     r_info = await get_alert_rule(toolset, rule_uid)
                     self.mission_mcp_read_calls += 1
-                    self.instance_mcp_read_calls += 1
+                    self.mcp_read_calls += 1
                     if not is_node_alerting(r_info, anomalous_node_id):
                         now_clear = datetime.now(timezone.utc)
                         alert_resolved_at = now_clear.isoformat()
