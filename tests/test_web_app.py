@@ -123,3 +123,45 @@ async def test_alert_rule_health_fail_closed(monkeypatch):
         assert data_ok["status"] == "healthy"
         assert data_ok["alert_rule_status"] == "ok"
 
+
+@pytest.mark.asyncio
+async def test_alert_pending_and_cleared_badge():
+    """Verify alert_pending in state and ALERT CLEARED badge rendering on incident card."""
+    from callsheet.web.app import worker
+    from callsheet.farm.models import ScenarioType
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Baseline: alert_pending should be False
+        await client.post("/api/scenario", json={"scenario": "BASELINE"})
+        res = await client.get("/api/state")
+        data = res.json()
+        assert data["alert_pending"] is False
+
+        # 2. Thermal throttling: alert_pending should become True
+        await client.post("/api/scenario", json={"scenario": "THERMAL_THROTTLING"})
+        res_throttled = await client.get("/api/state")
+        data_throttled = res_throttled.json()
+        assert data_throttled["alert_pending"] is True
+
+        # SSR should show GRAFANA ALERT PENDING
+        res_html = await client.get("/")
+        assert "GRAFANA ALERT PENDING" in res_html.text
+
+        # 3. Verify ALERT CLEARED badge rendering in SSR when latest_mission has quarantine_to_alert_cleared_seconds
+        sample_mission = dict(worker.latest_mission)
+        sample_mission["incident_id"] = "999"
+        sample_mission["incident_status"] = "resolved"
+        sample_mission["time_intervention_to_resolved_seconds"] = 38.5
+        sample_mission["quarantine_to_alert_cleared_seconds"] = 22.4
+        sample_mission["panel_image_url"] = "/api/missions/sample/panel.png"
+        sample_mission["mcp_read_calls"] = 41
+        sample_mission["mcp_write_calls"] = 8
+        worker.latest_mission = sample_mission
+
+        res_mission_html = await client.get("/")
+        assert "ALERT CLEARED IN 22.4s" in res_mission_html.text
+        assert "MISSION MCP TOOL CALLS: 41 READS / 8 WRITES" in res_mission_html.text
+
+        # Restore baseline
+        await client.post("/api/scenario", json={"scenario": "BASELINE"})
+

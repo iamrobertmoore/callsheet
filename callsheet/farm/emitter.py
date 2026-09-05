@@ -121,6 +121,11 @@ class FarmTelemetryEmitter:
             description="Buffer hours remaining before contractual delivery deadline (negative = slipping)",
             unit="h",
         )
+        self.gauge_active_shot = self.meter.create_gauge(
+            name="render_farm_node_active_shot",
+            description="1 if node has an active shot allocated, 0 otherwise",
+            unit="1",
+        )
 
     def _init_logs(self) -> None:
         self.log_exporter = OTLPLogExporter()
@@ -171,6 +176,12 @@ class FarmTelemetryEmitter:
             self.gauge_temp.set(node.temperature_celsius, labels)
             self.gauge_gpu.set(node.gpu_utilization, labels)
             self.gauge_node_status.set(status_int, labels)
+
+            has_shot = 1 if (node.current_shot_id is not None) else 0
+            self.gauge_active_shot.set(
+                has_shot,
+                {"node_id": node.id, "deployment_id": self.deployment_id},
+            )
 
             # If node is throttled or overheating, emit a structured thermal log and throttled trace
             if node.status == NodeStatus.THROTTLED or node.temperature_celsius > node.thermal_limit_celsius:

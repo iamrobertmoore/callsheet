@@ -74,8 +74,14 @@ class MissionResult(BaseModel):
     deeplinks: Dict[str, str] = Field(default_factory=dict)
     panel_image_url: Optional[str] = None
     time_intervention_to_resolved_seconds: Optional[float] = None
+    alert_resolved_at: Optional[str] = None
+    quarantine_to_alert_cleared_seconds: Optional[float] = None
+    scenario_primed_at: Optional[str] = None
+    alert_active_at: Optional[str] = None
     mcp_read_calls: int = 0
     mcp_write_calls: int = 0
+    instance_mcp_read_calls: int = 0
+    instance_mcp_write_calls: int = 0
     trigger_type: str = "grafana_alert"
     scenario_primed_by: Optional[str] = "cycle_boundary"
 
@@ -119,6 +125,22 @@ def parse_loki_frame_duration(line: str) -> Optional[float]:
     return None
 
 
+def is_node_alerting(rule_info: Optional[Dict[str, Any]], node_id: str) -> bool:
+    """Checks whether the alert rule has an active firing alert instance for the given node_id."""
+    if not rule_info:
+        return False
+    state = str(rule_info.get("state", "")).lower()
+    if state == "normal":
+        return False
+    alerts = rule_info.get("alerts", [])
+    if not alerts and state != "firing":
+        return False
+    for a in alerts:
+        if a.get("state") == "Alerting" and a.get("labels", {}).get("node_id") == node_id:
+            return True
+    return False
+
+
 class MultiStepMissionRunner:
     """
     Executes load-bearing multi-step observability investigations across Prometheus, Loki,
@@ -145,6 +167,8 @@ class MultiStepMissionRunner:
         self.dashboard_uid = os.getenv("GRAFANA_FARM_DASHBOARD_UID", "callsheet-control-tower")
         self.mcp_read_calls = 0
         self.mcp_write_calls = 0
+        self.mission_mcp_read_calls = 0
+        self.mission_mcp_write_calls = 0
 
         self.verification_progress: Optional[Dict[str, Any]] = None
         self.progress_callback: Optional[Any] = None
@@ -171,8 +195,10 @@ class MultiStepMissionRunner:
         }
         if tool_name in WRITE_TOOLS:
             self.mcp_write_calls += 1
+            self.mission_mcp_write_calls += 1
         else:
             self.mcp_read_calls += 1
+            self.mission_mcp_read_calls += 1
 
         try:
             res = await toolset._execute_with_session(
@@ -365,6 +391,7 @@ class MultiStepMissionRunner:
         max_poll_seconds: Optional[float] = None,
         trigger_type: str = "grafana_alert",
         scenario_primed_by: Optional[str] = None,
+        scenario_primed_at: Optional[str] = None,
         alert_evidence: Optional[Dict[str, Any]] = None,
     ) -> MissionResult:
         """
@@ -379,6 +406,8 @@ class MultiStepMissionRunner:
         7. Producer Callsheet Briefing Generation (Vertex AI Gemini) - GENERATIVE_SYNTHESIS
         """
         steps: List[MissionStep] = []
+        self.mission_mcp_read_calls = 0
+        self.mission_mcp_write_calls = 0
 
         # Connect to MCP toolset
         params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
@@ -392,6 +421,8 @@ class MultiStepMissionRunner:
             try:
                 rule_uid = PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else "cfxbt56wwbocge"
                 rule_info = await get_alert_rule(toolset, rule_uid)
+                self.mission_mcp_read_calls += 1
+                self.instance_mcp_read_calls += 1
                 if rule_info:
                     alerts = rule_info.get("alerts", [])
                     active_alert = next((a for a in alerts if a.get("state") == "Alerting"), None)
@@ -417,11 +448,21 @@ class MultiStepMissionRunner:
                     active_time_str = dt.strftime("%H:%M:%S")
                 except Exception:
                     active_time_str = str(active_at_raw)
-            desc = (
-                f"Alert received from Grafana: {alert_node}, active since {active_time_str} UTC."
-                if active_time_str
-                else f"Alert received from Grafana: {alert_node}."
-            )
+            primed_time_str = ""
+            if scenario_primed_at:
+                try:
+                    dt_p = datetime.fromisoformat(str(scenario_primed_at).replace("Z", "+00:00"))
+                    primed_time_str = dt_p.strftime("%H:%M:%S")
+                except Exception:
+                    primed_time_str = str(scenario_primed_at)
+
+            desc = f"Alert received from Grafana: {alert_node}"
+            if active_time_str:
+                desc += f", active since {active_time_str} UTC"
+            if primed_time_str:
+                desc += f" (scenario primed at {primed_time_str} UTC)"
+            desc += "."
+
             step0 = MissionStep(
                 step_number=0,
                 name="Grafana Alert Trigger",
@@ -432,6 +473,8 @@ class MultiStepMissionRunner:
                     "rule_uid": alert_evidence.get("rule_uid", ""),
                     "labels": alert_evidence.get("labels", {}),
                     "activeAt": active_at_raw,
+                    "alert_active_at": active_at_raw,
+                    "scenario_primed_at": scenario_primed_at,
                     "state": alert_evidence.get("state", "Alerting"),
                 },
                 status="COMPLETED",
@@ -1005,6 +1048,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         accepted_tempo_trace_id: Optional[str] = None
         tempo_raytrace_duration_s: Optional[float] = None
         tempo_grace_deadline: Optional[float] = None
+        alert_resolved_at: Optional[str] = None
+        quarantine_to_alert_cleared_seconds: Optional[float] = None
 
         witnesses_accepted: List[str] = []
         is_verified = False
@@ -1135,6 +1180,38 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             except Exception as e:
                 logger.warning("Tempo verification poll failed on attempt %d: %s", poll_attempts, e)
 
+            # 4. Query Grafana Alert Rule to confirm clearance on anomalous node
+            if alert_resolved_at is None:
+                try:
+                    rule_uid = PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else "cfxbt56wwbocge"
+                    r_info = await get_alert_rule(toolset, rule_uid)
+                    self.mission_mcp_read_calls += 1
+                    self.instance_mcp_read_calls += 1
+                    if not is_node_alerting(r_info, anomalous_node_id):
+                        now_clear = datetime.now(timezone.utc)
+                        alert_resolved_at = now_clear.isoformat()
+                        quarantine_to_alert_cleared_seconds = round(now_clear.timestamp() - intervention_epoch, 1)
+                        logger.info(
+                            "Grafana alert cleared for %s in %.1fs (at %s)",
+                            anomalous_node_id,
+                            quarantine_to_alert_cleared_seconds,
+                            now_clear.strftime("%H:%M:%S UTC"),
+                        )
+                        if incident_id:
+                            try:
+                                await self._execute_mcp_tool(
+                                    toolset,
+                                    "add_activity_to_incident",
+                                    {
+                                        "incidentId": incident_id,
+                                        "body": f"Grafana alert cleared at {now_clear.strftime('%H:%M:%S UTC')}.",
+                                    },
+                                )
+                            except Exception as e:
+                                logger.warning("Failed to add alert cleared activity to incident #%s: %s", incident_id, e)
+                except Exception as ex:
+                    logger.warning("Failed to check alert rule state during Step 6 poll: %s", ex)
+
             # Check if Loki and Prometheus samples are both retrieved
             if latest_loki_entry is not None and latest_prom_entry is not None:
                 # If Tempo is not yet available, continue polling Tempo alone for up to 30s
@@ -1221,6 +1298,42 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         # Clear active progress
         self.verification_progress = None
 
+        # Close loop in Grafana's terms: Ensure alert rule state is confirmed cleared (up to 90s from quarantine)
+        if alert_resolved_at is None:
+            rule_uid = PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else "cfxbt56wwbocge"
+            alert_poll_deadline = intervention_epoch + 90.0
+            while time.time() < alert_poll_deadline and alert_resolved_at is None:
+                await asyncio.sleep(min(effective_interval, 3.0))
+                try:
+                    r_info = await get_alert_rule(toolset, rule_uid)
+                    self.mission_mcp_read_calls += 1
+                    self.instance_mcp_read_calls += 1
+                    if not is_node_alerting(r_info, anomalous_node_id):
+                        now_clear = datetime.now(timezone.utc)
+                        alert_resolved_at = now_clear.isoformat()
+                        quarantine_to_alert_cleared_seconds = round(now_clear.timestamp() - intervention_epoch, 1)
+                        logger.info(
+                            "Grafana alert cleared for %s in %.1fs (at %s)",
+                            anomalous_node_id,
+                            quarantine_to_alert_cleared_seconds,
+                            now_clear.strftime("%H:%M:%S UTC"),
+                        )
+                        if incident_id:
+                            try:
+                                await self._execute_mcp_tool(
+                                    toolset,
+                                    "add_activity_to_incident",
+                                    {
+                                        "incidentId": incident_id,
+                                        "body": f"Grafana alert cleared at {now_clear.strftime('%H:%M:%S UTC')}.",
+                                    },
+                                )
+                            except Exception as e:
+                                logger.warning("Failed to add alert cleared activity to incident #%s: %s", incident_id, e)
+                        break
+                except Exception as ex:
+                    logger.warning("Failed to check alert rule state during post-verification poll: %s", ex)
+
         # Check if window expired without definitive telemetry proof
         if verification_status == "PENDING_VERIFICATION":
             verification_status = "VERIFICATION_INCONCLUSIVE"
@@ -1255,6 +1368,9 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 f"150-second polling window expired without post-intervention frame completion logs or metrics. "
                 f"Intervention status left at PENDING_VERIFICATION. Immediate Technical Director investigation required."
             )
+
+        if alert_resolved_at and quarantine_to_alert_cleared_seconds is not None:
+            step6_desc += f" Grafana alert confirmed cleared in {quarantine_to_alert_cleared_seconds:.1f}s."
 
         # Epoch calculations for absolute time range
         verified_epoch = time.time()
@@ -1368,6 +1484,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "incident_id": incident_id,
                 "incident_status": incident_status,
                 "time_intervention_to_resolved_seconds": time_intervention_to_resolved_seconds,
+                "alert_resolved_at": alert_resolved_at,
+                "quarantine_to_alert_cleared_seconds": quarantine_to_alert_cleared_seconds,
             },
         )
         steps.append(step6)
@@ -1537,8 +1655,10 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "briefing_length": len(briefing_text),
                 "verification_status": verification_status,
                 "panel_image_url": panel_image_url,
-                "mcp_read_calls": self.mcp_read_calls,
-                "mcp_write_calls": self.mcp_write_calls,
+                "mcp_read_calls": self.mission_mcp_read_calls,
+                "mcp_write_calls": self.mission_mcp_write_calls,
+                "instance_mcp_read_calls": self.mcp_read_calls,
+                "instance_mcp_write_calls": self.mcp_write_calls,
             },
         )
         steps.append(step7)
@@ -1565,8 +1685,14 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             deeplinks=deeplinks,
             panel_image_url=panel_image_url,
             time_intervention_to_resolved_seconds=time_intervention_to_resolved_seconds,
-            mcp_read_calls=self.mcp_read_calls,
-            mcp_write_calls=self.mcp_write_calls,
+            alert_resolved_at=alert_resolved_at,
+            quarantine_to_alert_cleared_seconds=quarantine_to_alert_cleared_seconds,
+            scenario_primed_at=scenario_primed_at,
+            alert_active_at=alert_evidence.get("activeAt") if alert_evidence else None,
+            mcp_read_calls=self.mission_mcp_read_calls,
+            mcp_write_calls=self.mission_mcp_write_calls,
+            instance_mcp_read_calls=self.mcp_read_calls,
+            instance_mcp_write_calls=self.mcp_write_calls,
             trigger_type=trigger_type,
             scenario_primed_by=scenario_primed_by or "cycle_boundary",
         )

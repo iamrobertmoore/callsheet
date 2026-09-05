@@ -105,6 +105,7 @@ async def get_farm_state():
         "shots": {k: v.model_dump(mode="json") for k, v in state.shots.items()},
         "latest_mission": worker.latest_mission,
         "is_investigating": worker.is_investigating,
+        "alert_pending": worker.alert_pending,
         "interventions_count": len(dispatcher.history),
         "verification_progress": worker.verification_progress,
         "scenario_primed_by": worker.scenario_primed_by,
@@ -149,6 +150,7 @@ async def run_mission(req: MissionRequest):
             force_verification_fault=bool(req.force_verification_fault),
             trigger_type=trigger_type,
             scenario_primed_by=scenario_primed_by,
+            scenario_primed_at=worker.scenario_primed_at,
         )
         worker.missions_this_instance += 1
         worker.latest_mission = result.model_dump(mode="json")
@@ -500,13 +502,16 @@ def render_ssr_briefing(mission: Optional[dict]) -> str:
     is_resolved = (incident_status == "resolved")
     badge_class = "badge-resolved" if is_resolved else "badge-active"
     status_label = f"RESOLVED IN {time_res:.1f}s" if (is_resolved and time_res) else ("RESOLVED" if is_resolved else "ACTIVE")
+    cleared_sec = mission.get("quarantine_to_alert_cleared_seconds")
+    cleared_badge_html = f'<span class="incident-badge badge-resolved">ALERT CLEARED IN {cleared_sec:.1f}s</span>' if cleared_sec else ""
     inc_url = incident_url or "#"
 
     cards = [f"""
         <div class="grafana-writeback-card">
             <div class="grafana-incident-row">
-                <div style="display: flex; align-items: center; gap: 8px;">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                     <span class="incident-badge {badge_class}">{status_label}</span>
+                    {cleared_badge_html}
                     <span style="font-family: var(--font-condensed); font-weight: 700; font-size: 12px; color: var(--text-primary);">
                         GRAFANA IRM INCIDENT #{incident_id or ''}
                     </span>
@@ -540,7 +545,7 @@ def render_ssr_briefing(mission: Optional[dict]) -> str:
                 <img src="{panel_img}" alt="Grafana Control Tower Panel Snapshot" />
                 <div class="panel-snapshot-meta">
                     <span>CONTROL TOWER PANEL SNAPSHOT (get_panel_image)</span>
-                    <span>MCP TOOL CALLS: {reads} READS / {writes} WRITES</span>
+                    <span>MISSION MCP TOOL CALLS: {reads} READS / {writes} WRITES</span>
                 </div>
             </div>
         """)
@@ -1333,7 +1338,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             width: 100%;
             flex: 1 1 auto;
             min-height: 0;
-            object-fit: cover;
+            object-fit: contain;
             display: block;
         }
         .panel-snapshot-meta {
@@ -1404,10 +1409,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 </div>
                 <div class="masthead-cell">
                     <span class="cell-label">SUPERVISOR WATCH</span>
-                    <span class="cell-value status-cell-val" id="agent-status-text">
-                        <span class="status-pip"></span>
-                        AUTONOMOUS WATCH ACTIVE
-                    </span>
+                    <span class="cell-value status-cell-val" id="agent-status-text"><!-- SSR_STATUS_TEXT --></span>
                 </div>
             </div>
         </header>
@@ -1611,6 +1613,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> ' + data.verification_progress.message;
                 } else if (data.is_investigating) {
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)';
+                } else if (data.alert_pending) {
+                    statusText.innerHTML = '<span class="status-pip" style="color: var(--state-critical);"></span> GRAFANA ALERT PENDING';
                 } else {
                     statusText.innerHTML = '<span class="status-pip"></span> AUTONOMOUS WATCH ACTIVE';
                 }
@@ -1795,13 +1799,16 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 const badgeClass = isResolved ? 'badge-resolved' : 'badge-active';
                 const timeSec = mission.time_intervention_to_resolved_seconds;
                 const statusLabel = isResolved ? (timeSec ? `RESOLVED IN ${timeSec.toFixed(1)}s` : 'RESOLVED') : 'ACTIVE';
+                const clearedSec = mission.quarantine_to_alert_cleared_seconds;
+                const clearedBadgeHtml = clearedSec ? `<span class="incident-badge badge-resolved">ALERT CLEARED IN ${Number(clearedSec).toFixed(1)}s</span>` : '';
                 const incUrl = mission.incident_url || '#';
 
                 writebackHtml += `
                     <div class="grafana-writeback-card">
                         <div class="grafana-incident-row">
-                            <div style="display: flex; align-items: center; gap: 8px;">
+                            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                                 <span class="incident-badge ${badgeClass}">${statusLabel}</span>
+                                ${clearedBadgeHtml}
                                 <span style="font-family: var(--font-condensed); font-weight: 700; font-size: 12px; color: var(--text-primary);">
                                     GRAFANA IRM INCIDENT #${mission.incident_id || ''}
                                 </span>
@@ -1834,7 +1841,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                             <img src="${mission.panel_image_url}" alt="Grafana Control Tower Panel Snapshot" />
                             <div class="panel-snapshot-meta">
                                 <span>CONTROL TOWER PANEL SNAPSHOT (get_panel_image)</span>
-                                <span>MCP TOOL CALLS: ${reads} READS / ${writes} WRITES</span>
+                                <span>MISSION MCP TOOL CALLS: ${reads} READS / ${writes} WRITES</span>
                             </div>
                         </div>
                     `;
@@ -2231,10 +2238,20 @@ async def get_producer_dashboard():
     incident_status = mission.get("incident_status", "") if mission else ""
     steps_len = len(steps)
 
+    if worker.verification_progress and worker.verification_progress.get("active"):
+        status_text_html = f'<span class="status-pip" style="color: var(--heat-warm);"></span> {worker.verification_progress.get("message")}'
+    elif worker.is_investigating:
+        status_text_html = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)'
+    elif worker.alert_pending:
+        status_text_html = '<span class="status-pip" style="color: var(--state-critical);"></span> GRAFANA ALERT PENDING'
+    else:
+        status_text_html = '<span class="status-pip"></span> AUTONOMOUS WATCH ACTIVE'
+
     html = (
         PRODUCER_UI_TEMPLATE
         .replace("<!-- SSR_DELIVERY_BANNER -->", delivery_banner_html)
         .replace("<!-- SSR_SLATE -->", slate_html)
+        .replace("<!-- SSR_STATUS_TEXT -->", status_text_html)
         .replace("<!-- SSR_BRIEFING_TIME -->", time_label)
         .replace("<!-- SSR_BRIEFING -->", briefing_html)
         .replace("<!-- SSR_TRAIL -->", trail_html)

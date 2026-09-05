@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from callsheet.agent.alerting import ensure_alert_rule, get_alert_rule, PRODUCTION_ALERT_RULE_UID
@@ -123,9 +123,24 @@ class FarmWorker:
         self.alert_rule_status: str = "initializing"
         self.alert_rule_error: Optional[str] = None
         self.scenario_primed_by: str = "instance_start"
+        self.scenario_primed_at: str = datetime.now(timezone.utc).isoformat()
         self.fault_injected_at: Optional[float] = time.time()
         self.alert_firing_observed_at: Optional[float] = None
         self.mission_started_at: Optional[float] = None
+
+    @property
+    def alert_pending(self) -> bool:
+        """
+        Returns True when a node fault exists (temperature > 90C with active shot allocated)
+        but the mission investigation has not yet started.
+        """
+        if self.is_investigating:
+            return False
+        for node in self.simulator.state.nodes.values():
+            if (node.status == NodeStatus.THROTTLED or node.temperature_celsius > 90.0) and node.current_shot_id is not None:
+                if self._last_investigated_node != node.id:
+                    return True
+        return False
 
     @property
     def verification_progress(self) -> Optional[Dict[str, Any]]:
@@ -224,6 +239,7 @@ class FarmWorker:
                     self._last_cycle_epoch = current_epoch
                     self._last_investigated_node = None
                     self.scenario_primed_by = trigger
+                    self.scenario_primed_at = datetime.now(timezone.utc).isoformat()
                     self.fault_injected_at = time.time()
                     self.alert_firing_observed_at = None
                     self.mission_started_at = None
@@ -304,6 +320,22 @@ class FarmWorker:
                 firing_alert = alerts[0]
 
             if firing_alert:
+                active_at_raw = firing_alert.get("activeAt", "")
+                # Watchdog hygiene: ignore any alert instance whose activeAt is earlier than scenario_primed_at
+                if self.scenario_primed_at and active_at_raw:
+                    try:
+                        dt_active = datetime.fromisoformat(str(active_at_raw).replace("Z", "+00:00"))
+                        dt_primed = datetime.fromisoformat(str(self.scenario_primed_at).replace("Z", "+00:00"))
+                        if dt_active < (dt_primed - timedelta(seconds=1)):
+                            logger.info(
+                                "Watchdog ignoring stale alert instance (activeAt: %s < primed_at: %s)",
+                                active_at_raw,
+                                self.scenario_primed_at,
+                            )
+                            return
+                    except Exception as parse_ex:
+                        logger.warning("Error parsing alert activeAt or primed_at: %s", parse_ex)
+
                 target_node = firing_alert.get("labels", {}).get("node_id", "node-07")
                 if self._last_investigated_node != target_node:
                     self.alert_firing_observed_at = time.time()
@@ -311,14 +343,14 @@ class FarmWorker:
                         "Watchdog observed Grafana alert %s FIRING for %s (activeAt: %s). Running mission...",
                         self.alert_rule_uid,
                         target_node,
-                        firing_alert.get("activeAt"),
+                        active_at_raw,
                     )
                     self.is_investigating = True
                     self._last_investigated_node = target_node
                     alert_evidence = {
                         "rule_uid": self.alert_rule_uid,
                         "labels": firing_alert.get("labels", {}),
-                        "activeAt": firing_alert.get("activeAt", ""),
+                        "activeAt": active_at_raw,
                         "state": "Alerting",
                     }
                     self._mission_task = asyncio.create_task(
@@ -348,6 +380,7 @@ class FarmWorker:
                 show_id="show-aethelgard",
                 trigger_type="grafana_alert",
                 scenario_primed_by=self.scenario_primed_by,
+                scenario_primed_at=self.scenario_primed_at,
                 alert_evidence=alert_evidence,
             )
             self.missions_this_instance += 1
@@ -365,6 +398,7 @@ class FarmWorker:
         self._last_investigated_node = None
         self.is_investigating = False
         self.scenario_primed_by = "demo"
+        self.scenario_primed_at = datetime.now(timezone.utc).isoformat()
         self.fault_injected_at = time.time()
         self.alert_firing_observed_at = None
         self.mission_started_at = None
@@ -398,6 +432,7 @@ class FarmWorker:
                 force_verification_fault=force_verification_fault,
                 trigger_type=trigger_type,
                 scenario_primed_by=self.scenario_primed_by,
+                scenario_primed_at=self.scenario_primed_at,
             )
             self.missions_this_instance += 1
             self.latest_mission = res.model_dump(mode="json")
