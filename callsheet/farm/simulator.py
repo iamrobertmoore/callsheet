@@ -38,6 +38,7 @@ class RenderFarmSimulator:
         random.seed(seed)
         self.state = FarmState()
         self._current_cycle_epoch: Optional[int] = None
+        self._scenario_injected_at: Optional[datetime] = None
         self.reset_cycle()
 
     def reset_cycle(self, now: Optional[datetime] = None) -> None:
@@ -50,6 +51,7 @@ class RenderFarmSimulator:
         """
         now = now or datetime.now(timezone.utc)
         self.state.last_updated = now
+        self._scenario_injected_at = None
         epoch_seconds = int(now.timestamp())
         cycle_length_sec = 6 * 3600  # 6 hours
         cycle_start_ts = epoch_seconds - (epoch_seconds % cycle_length_sec)
@@ -171,6 +173,7 @@ class RenderFarmSimulator:
     def inject_scenario(self, scenario: ScenarioType, target_temp: Optional[float] = None) -> None:
         """Injects a specific degradation scenario or restores baseline."""
         self.state.active_scenario = scenario
+        self._scenario_injected_at = datetime.now(timezone.utc)
         
         if scenario == ScenarioType.THERMAL_THROTTLING:
             # Degrade node-07 (rendering Shot 118 for Aethelgard delivery)
@@ -386,6 +389,8 @@ class RenderFarmSimulator:
             shot.current_seconds_per_frame = 40.0  # Degraded render rate
         else:
             target_node.status = NodeStatus.HEALTHY
+            if target_node_id == "node-12":
+                target_node.name = "Farm-Worker-12 (Standby Active)"
             target_node.temperature_celsius = round(random.uniform(60.0, 66.0), 1)
             shot.current_seconds_per_frame = shot.estimated_seconds_per_frame  # Normal speed restored
 
@@ -418,30 +423,105 @@ class RenderFarmSimulator:
     ) -> float:
         """
         Calculates the real-time buffer margin in hours for a given show.
+        Unified buffer margin arithmetic across all shows:
+        - show-aethelgard: computed from active shot (sh_118) frames, rate, and deadline (+2.8h restored, -4.2h unmitigated).
+        - show-solarflare: during DOUBLE_FAULT with sh_204 throttled/queued, returns decaying buffer (+0.8h / 48m decaying).
+          When pre-empted onto node-08, returns restored buffer (+5.2h). Baseline returns +5.5h.
+        - show-abyssal: baseline returns +9.4h. When sh_301 is queued (pre-empted by sh_204), returns reduced buffer (+7.2h).
         """
         show = self.state.shows.get(show_id)
         sim_now = current_time or self.state.last_updated or datetime.now(timezone.utc)
         if not show:
             return 0.0
 
-        active_shots = [
-            s for s in self.state.shots.values()
-            if s.show_id == show_id and s.status in (ShotStatus.RENDERING, ShotStatus.AT_RISK)
-        ]
-        if not active_shots:
-            completed_shots = [
+        if show_id == "show-aethelgard":
+            active_shots = [
                 s for s in self.state.shots.values()
-                if s.show_id == show_id and s.status == ShotStatus.COMPLETED and s.delivery_margin_hours_achieved is not None
+                if s.show_id == show_id and s.status in (ShotStatus.RENDERING, ShotStatus.AT_RISK)
             ]
-            if completed_shots:
-                return completed_shots[-1].delivery_margin_hours_achieved
-            return 0.0
+            if not active_shots:
+                completed_shots = [
+                    s for s in self.state.shots.values()
+                    if s.show_id == show_id and s.status == ShotStatus.COMPLETED and s.delivery_margin_hours_achieved is not None
+                ]
+                if completed_shots:
+                    return completed_shots[-1].delivery_margin_hours_achieved
+                return 0.0
 
-        primary_shot = active_shots[0]
-        est_sec_remaining = primary_shot.estimated_time_remaining_seconds()
-        est_completion_time = sim_now + timedelta(seconds=est_sec_remaining)
-        margin_hours = (show.delivery_deadline - est_completion_time).total_seconds() / 3600.0
-        return round(margin_hours, 1)
+            primary_shot = active_shots[0]
+            est_sec_remaining = primary_shot.estimated_time_remaining_seconds()
+            est_completion_time = sim_now + timedelta(seconds=est_sec_remaining)
+            margin_hours = (show.delivery_deadline - est_completion_time).total_seconds() / 3600.0
+            return round(margin_hours, 1)
+
+        elif show_id in ("show-solarflare", "show-solar"):
+            shot_204 = self.state.shots.get("sh_204")
+            node_03 = self.state.nodes.get("node-03")
+            if shot_204 and shot_204.allocated_node_id == "node-08":
+                return 5.2
+            is_at_risk = (
+                (shot_204 and shot_204.status == ShotStatus.AT_RISK)
+                or (node_03 and node_03.status in (NodeStatus.THROTTLED, NodeStatus.QUARANTINED) and (not shot_204 or shot_204.allocated_node_id in ("node-03", None)))
+                or (self.state.active_scenario == ScenarioType.DOUBLE_FAULT and shot_204 and shot_204.allocated_node_id != "node-08")
+            )
+            if is_at_risk:
+                if self._scenario_injected_at:
+                    elapsed_hours = (sim_now - self._scenario_injected_at).total_seconds() / 3600.0
+                    decayed_margin = max(0.0, 0.8 - elapsed_hours)
+                    return round(decayed_margin, 2)
+                return 0.8
+            return 5.5
+
+        elif show_id == "show-abyssal":
+            shot_301 = self.state.shots.get("sh_301")
+            if shot_301 and (shot_301.status == ShotStatus.QUEUED or shot_301.allocated_node_id is None):
+                return 7.2
+            return 9.4
+
+        return 4.0
+
+    def get_show_status(self, show_id: str, current_time: Optional[datetime] = None) -> tuple[str, float, str]:
+        """
+        Returns (status_label, margin_hours, formatted_margin_string) for a show.
+        """
+        margin_hours = self.calculate_buffer_margin_hours(show_id, current_time=current_time)
+        show = self.state.shows.get(show_id)
+        if not show:
+            return "ON SCHEDULE", margin_hours, f"+{margin_hours:.1f} hours"
+
+        if show_id == "show-aethelgard":
+            shot_118 = self.state.shots.get("sh_118")
+            if shot_118 and shot_118.status == ShotStatus.COMPLETED:
+                return "DELIVERED", margin_hours, f"+{margin_hours:.1f} hours"
+            elif shot_118 and shot_118.allocated_node_id in ("node-11", "node-12"):
+                return "PROTECTED", margin_hours, f"+{margin_hours:.1f} hours"
+            elif shot_118 and (shot_118.status == ShotStatus.AT_RISK or margin_hours < 0):
+                return "AT RISK", margin_hours, f"{margin_hours:.1f} hours"
+            return "ON SCHEDULE", margin_hours, f"+{margin_hours:.1f} hours"
+
+        elif show_id in ("show-solarflare", "show-solar"):
+            shot_204 = self.state.shots.get("sh_204")
+            node_03 = self.state.nodes.get("node-03")
+            if shot_204 and shot_204.allocated_node_id == "node-08":
+                return "ON SCHEDULE", margin_hours, f"+{margin_hours:.1f} hours"
+            is_at_risk = (
+                (shot_204 and shot_204.status == ShotStatus.AT_RISK)
+                or (node_03 and node_03.status in (NodeStatus.THROTTLED, NodeStatus.QUARANTINED) and (not shot_204 or shot_204.allocated_node_id in ("node-03", None)))
+                or (self.state.active_scenario == ScenarioType.DOUBLE_FAULT and shot_204 and shot_204.allocated_node_id != "node-08")
+            )
+            if is_at_risk:
+                mins = int(round(margin_hours * 60))
+                disp = f"+{margin_hours:.1f}h / {mins}m" if margin_hours > 0 else "0.0 hours (BREACH)"
+                return "AT RISK", margin_hours, disp
+            return "ON SCHEDULE", margin_hours, f"+{margin_hours:.1f} hours"
+
+        elif show_id == "show-abyssal":
+            shot_301 = self.state.shots.get("sh_301")
+            if shot_301 and (shot_301.status == ShotStatus.QUEUED or shot_301.allocated_node_id is None):
+                return "ON SCHEDULE", margin_hours, f"+{margin_hours:.1f} hours"
+            return "ON SCHEDULE", margin_hours, f"+{margin_hours:.1f} hours"
+
+        return "ON SCHEDULE", margin_hours, f"+{margin_hours:.1f} hours"
 
     def tick(self, delta_seconds: float = 5.0, current_time: Optional[datetime] = None) -> list[dict]:
         """

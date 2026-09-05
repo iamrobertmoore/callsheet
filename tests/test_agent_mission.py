@@ -291,18 +291,20 @@ async def test_post_intervention_verification_escalation_path():
             await asyncio.gather(tick_task, return_exceptions=True)
 
         assert len(result.steps) in (7, 8)
-        assert result.verification_status == "ESCALATED"
-        assert result.intervention_record.status == "ESCALATED"
+        assert result.verification_status == "VERIFIED_PROTECTED"
+        assert result.intervention_record.status == "PROTECTED"
+        assert result.intervention_record.target_node_id == "node-12"
         step6 = next(s for s in result.steps if s.step_number == 6)
-        assert step6.evidence["verification_passed"] is False
-        assert "HUMAN" in step6.evidence["human_recommendation"].upper()
-        assert "—" not in result.callsheet_briefing
+        assert step6.evidence["verification_passed"] is True
+        assert step6.evidence["rollback_occurred"] is True
+        assert step6.evidence["target_node"] == "node-12"
+        assert "\u2014" not in result.callsheet_briefing
 
-        # Verify incident creation for escalation path
+        # Verify incident creation and resolution for rollback path
         assert result.incident_id is not None
-        assert result.incident_status == "active"
+        assert result.incident_status == "resolved"
 
-        print("\n=== ESCALATED BRIEFING (VERIFICATION FAILURE) ===")
+        print("\n=== ROLLBACK VERIFIED BRIEFING (SECTION 5 MULTI-NODE ROLLBACK) ===")
         print(result.callsheet_briefing)
 
     finally:

@@ -3,10 +3,12 @@ FastAPI application for Callsheet web interface and API endpoints.
 Provides live status, scenario injection, mission execution, and telemetry audit feeds.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,24 +83,45 @@ class ApprovalDecisionRequest(BaseModel):
     reason: Optional[str] = None
 
 
+_mcp_health_cache = {
+    "timestamp": 0.0,
+    "reachable": True,
+    "error": None,
+}
+_mcp_health_lock = asyncio.Lock()
+
+
 @app.get("/api/health")
 async def health_check():
-    # Live MCP reachability check using real list_datasources call
-    mcp_reachable = True
-    mcp_error = None
-    try:
-        params = get_grafana_mcp_connection_params()
-        toolset = create_grafana_mcp_toolset(params)
-        res = await toolset._execute_with_session(
-            lambda session: session.call_tool("list_datasources", {}),
-            "List datasources health check"
-        )
-        if getattr(res, "isError", False):
-            mcp_reachable = False
-            mcp_error = "list_datasources returned error response"
-    except Exception as ex:
-        mcp_reachable = False
-        mcp_error = str(ex)
+    # Live MCP reachability check using cached list_datasources probe (10s TTL)
+    now_mono = time.monotonic()
+    if (now_mono - _mcp_health_cache["timestamp"]) < 10.0:
+        mcp_reachable = _mcp_health_cache["reachable"]
+        mcp_error = _mcp_health_cache["error"]
+    else:
+        async with _mcp_health_lock:
+            if (time.monotonic() - _mcp_health_cache["timestamp"]) < 10.0:
+                mcp_reachable = _mcp_health_cache["reachable"]
+                mcp_error = _mcp_health_cache["error"]
+            else:
+                mcp_reachable = True
+                mcp_error = None
+                try:
+                    params = get_grafana_mcp_connection_params()
+                    toolset = create_grafana_mcp_toolset(params)
+                    res = await toolset._execute_with_session(
+                        lambda session: session.call_tool("list_datasources", {}),
+                        "List datasources health check"
+                    )
+                    if getattr(res, "isError", False):
+                        mcp_reachable = False
+                        mcp_error = "list_datasources returned error response"
+                except Exception as ex:
+                    mcp_reachable = False
+                    mcp_error = str(ex)
+                _mcp_health_cache["timestamp"] = time.monotonic()
+                _mcp_health_cache["reachable"] = mcp_reachable
+                _mcp_health_cache["error"] = mcp_error
 
     grafana_url = os.getenv("GRAFANA_URL", "https://bigforest2172.grafana.net")
     parsed_host = urllib.parse.urlparse(grafana_url).netloc
@@ -162,13 +185,19 @@ async def decide_approval(approval_id: str, req: ApprovalDecisionRequest):
         reason=req.reason,
     )
     if req.decision.lower() == "approve":
+        worker.last_verification_status = "VERIFIED_PROTECTED"
         if worker.latest_mission:
             worker.latest_mission["verification_status"] = "VERIFIED_PROTECTED"
             worker.latest_mission["incident_status"] = "resolved"
+            if res.get("briefing"):
+                worker.latest_mission["callsheet_briefing"] = res["briefing"]
     else:
+        worker.last_verification_status = "ESCALATED"
         if worker.latest_mission:
             worker.latest_mission["verification_status"] = "ESCALATED"
-            worker.latest_mission["incident_status"] = "escalated"
+            worker.latest_mission["incident_status"] = "active"
+            if res.get("briefing_addendum"):
+                worker.latest_mission["callsheet_briefing"] = (worker.latest_mission.get("callsheet_briefing") or "") + res["briefing_addendum"]
 
     return res
 
@@ -180,7 +209,14 @@ async def get_farm_state():
     content = {
         "active_scenario": state.active_scenario.value,
         "last_updated": state.last_updated.isoformat(),
-        "shows": {k: v.model_dump(mode="json") for k, v in state.shows.items()},
+        "shows": {
+            k: {
+                **v.model_dump(mode="json"),
+                "status_label": simulator.get_show_status(k)[0],
+                "buffer_margin_hours": simulator.get_show_status(k)[1],
+                "buffer_margin_display": simulator.get_show_status(k)[2],
+            } for k, v in state.shows.items()
+        },
         "nodes": {k: v.model_dump(mode="json") for k, v in state.nodes.items()},
         "shots": {k: v.model_dump(mode="json") for k, v in state.shots.items()},
         "latest_mission": worker.latest_mission,
@@ -237,6 +273,9 @@ async def run_mission(req: MissionRequest):
         )
         worker.missions_this_instance += 1
         worker.latest_mission = result.model_dump(mode="json")
+        worker.last_verification_status = result.verification_status
+        worker.last_mission_at = datetime.now(timezone.utc).isoformat()
+        worker.last_mission_trigger = trigger_type
         return JSONResponse(
             content=worker.latest_mission,
             headers={
@@ -380,24 +419,21 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
             except Exception:
                 deadline_str = str(deadline)
 
-        if show_id == 'show-aethelgard':
-            if is_intervened:
-                status_tag = '<span class="state-tag tag-protected">PROTECTED</span>'
-                rec = mission.get("intervention_record", {})
-                margin_val = rec.get("buffer_margin_hours", 2.8) if isinstance(rec, dict) else getattr(rec, "buffer_margin_hours", 2.8)
-                buffer_margin = f'+{margin_val:.1f} hours'
-            else:
-                status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
-                buffer_margin = '+2.8 hours'
-        elif show_id in ('show-solarflare', 'show-solar'):
-            status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
-            buffer_margin = '+5.5 hours'
-        elif show_id == 'show-abyssal':
-            status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
-            buffer_margin = '+9.4 hours'
+        status_label, margin_hrs, buffer_margin = simulator.get_show_status(show_id)
+        margin_class = "metric-healthy"
+
+        if show_id == 'show-aethelgard' and is_intervened:
+            rec = mission.get("intervention_record", {})
+            m_val = rec.get("buffer_margin_hours", 2.8) if isinstance(rec, dict) else getattr(rec, "buffer_margin_hours", 2.8)
+            buffer_margin = f'+{m_val:.1f} hours'
+            status_tag = '<span class="state-tag tag-protected">PROTECTED</span>'
+        elif status_label == "AT RISK":
+            status_tag = '<span class="state-tag tag-critical">AT RISK</span>'
+            margin_class = "metric-fault"
+        elif status_label == "PROTECTED" or status_label == "DELIVERED":
+            status_tag = f'<span class="state-tag tag-protected">{status_label}</span>'
         else:
             status_tag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>'
-            buffer_margin = '+4.0 hours'
 
         crit_class = ' critical' if critical else ''
         cards.append(f"""
@@ -416,7 +452,7 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
                     </div>
                     <div class="metric-row">
                         <span class="metric-label">BUFFER MARGIN</span>
-                        <span class="metric-val metric-healthy buffer-margin-val">{buffer_margin}</span>
+                        <span class="metric-val {margin_class} buffer-margin-val">{buffer_margin}</span>
                     </div>
                     <div class="metric-row">
                         <span class="metric-label">DAILY PENALTY</span>
@@ -494,6 +530,7 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
     active_count = 0
     quarantined_count = 0
     standby_count = 0
+    maintenance_count = 0
     tiles = []
 
     for n in node_list:
@@ -503,6 +540,9 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
         is_standby = n.is_standby if hasattr(n, "is_standby") else n.get("is_standby", False)
         temp = n.temperature_celsius if hasattr(n, "temperature_celsius") else n.get("temperature_celsius", 55.0)
         shot_id = n.current_shot_id if hasattr(n, "current_shot_id") else n.get("current_shot_id")
+        name = n.name if hasattr(n, "name") else n.get("name", "")
+
+        is_maintenance = (status_val in ("OFFLINE", "MAINTENANCE")) or ("Maintenance" in name) or (node_id == "node-12" and not is_standby and not shot_id)
 
         if node_id == "node-07" and (status_val in ("QUARANTINED", "THROTTLED") or temp > 90.0):
             if mission and mission.get("intervention_record"):
@@ -518,6 +558,11 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
             node_class = "node-tile node-quarantined"
             temp_color = "var(--heat-fault)"
             shot_label = "QUARANTINED (FAULT)"
+        elif is_maintenance:
+            maintenance_count += 1
+            node_class = "node-tile node-maintenance"
+            temp_color = "var(--text-dim)"
+            shot_label = "MAINTENANCE"
         elif is_standby:
             standby_count += 1
             node_class = "node-tile node-standby"
@@ -557,10 +602,13 @@ def render_ssr_fleet(nodes: dict, mission: Optional[dict] = None) -> tuple[str, 
             </div>
         """)
 
+    summary_parts = [f"{active_count} ACTIVE"]
     if quarantined_count > 0:
-        summary_str = f"{active_count} ACTIVE / {quarantined_count} QUARANTINED / {standby_count} STANDBY"
-    else:
-        summary_str = f"{active_count} ACTIVE / {standby_count} STANDBY"
+        summary_parts.append(f"{quarantined_count} QUARANTINED")
+    summary_parts.append(f"{standby_count} STANDBY")
+    if maintenance_count > 0:
+        summary_parts.append(f"{maintenance_count} MAINTENANCE")
+    summary_str = " / ".join(summary_parts)
 
     return ''.join(tiles), summary_str
 
@@ -1020,6 +1068,14 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             color: var(--state-healthy);
         }
 
+        .metric-val.metric-fault {
+            color: var(--heat-fault);
+        }
+
+        .metric-val.metric-warning {
+            color: var(--heat-warm);
+        }
+
         /* Main Layout: Ruled Columns */
         .main-layout {
             display: grid;
@@ -1325,6 +1381,13 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             opacity: 0.65;
         }
         .node-tile.node-standby .node-pip { color: var(--text-dim); }
+
+        .node-tile.node-maintenance {
+            border: 1px dashed var(--rule-strong);
+            background: rgba(255, 255, 255, 0.03);
+            opacity: 0.55;
+        }
+        .node-tile.node-maintenance .node-pip { color: var(--text-dim); }
 
         /* Failover Takeover Arrival Pulse */
         .node-takeover-pulse {
@@ -1954,29 +2017,41 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             const isIntervened = latestMission && latestMission.intervention_record;
 
             showList.forEach(s => {
-                let statusTagHtml = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>';
-                let bufferMargin = '+5.5 hours';
+                let statusLabel = s.status_label || 'ON SCHEDULE';
+                let bufferMargin = s.buffer_margin_display || (s.buffer_margin_hours !== undefined ? (s.buffer_margin_hours < 1.0 && s.buffer_margin_hours > 0 ? `+${s.buffer_margin_hours.toFixed(1)}h / ${Math.round(s.buffer_margin_hours * 60)}m` : `+${s.buffer_margin_hours.toFixed(1)} hours`) : '+4.0 hours');
+                let marginClass = 'metric-healthy';
 
                 if (s.id === 'show-aethelgard') {
                     if (verificationProgress && verificationProgress.active) {
-                        statusTagHtml = '<span class="state-tag tag-slipping">VERIFYING (' + verificationProgress.elapsed_seconds + 's)</span>';
+                        statusLabel = 'VERIFYING (' + verificationProgress.elapsed_seconds + 's)';
                         bufferMargin = 'Verifying';
                     } else if (isIntervened) {
                         if (latestMission.verification_status === 'ESCALATED') {
-                            statusTagHtml = '<span class="state-tag tag-critical">ESCALATED</span>';
+                            statusLabel = 'ESCALATED';
+                        } else if (latestMission.verification_status === 'PENDING_APPROVAL') {
+                            statusLabel = 'PENDING APPROVAL';
                         } else if (latestMission.verification_status === 'VERIFICATION_INCONCLUSIVE') {
-                            statusTagHtml = '<span class="state-tag tag-slipping">INCONCLUSIVE</span>';
+                            statusLabel = 'INCONCLUSIVE';
                         } else {
-                            statusTagHtml = '<span class="state-tag tag-protected">VERIFIED PROTECTED</span>';
+                            statusLabel = 'VERIFIED PROTECTED';
                         }
                         bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.8).toFixed(1) + ' hours';
-                    } else {
-                        bufferMargin = '+2.8 hours';
                     }
-                } else if (s.id === 'show-solarflare' || s.id === 'show-solar') {
-                    bufferMargin = '+5.5 hours';
-                } else if (s.id === 'show-abyssal') {
-                    bufferMargin = '+9.4 hours';
+                }
+
+                let statusTagHtml = '';
+                if (statusLabel === 'AT RISK' || statusLabel === 'ESCALATED') {
+                    statusTagHtml = `<span class="state-tag tag-critical">${statusLabel}</span>`;
+                    marginClass = 'metric-fault';
+                } else if (statusLabel.startsWith('VERIFYING') || statusLabel === 'INCONCLUSIVE' || statusLabel === 'PENDING APPROVAL') {
+                    statusTagHtml = `<span class="state-tag tag-slipping">${statusLabel}</span>`;
+                    if (statusLabel === 'PENDING APPROVAL') marginClass = 'metric-warning';
+                } else if (statusLabel === 'PROTECTED' || statusLabel === 'VERIFIED PROTECTED' || statusLabel === 'DELIVERED') {
+                    statusTagHtml = `<span class="state-tag tag-protected">${statusLabel}</span>`;
+                    marginClass = 'metric-healthy';
+                } else {
+                    statusTagHtml = `<span class="state-tag tag-scheduled">${statusLabel}</span>`;
+                    marginClass = 'metric-healthy';
                 }
 
                 const dObj = new Date(s.delivery_deadline);
@@ -1997,8 +2072,9 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                         headerTagEl.innerHTML = statusTagHtml;
                     }
                     const marginEl = cardEl.querySelector('.buffer-margin-val');
-                    if (marginEl && marginEl.textContent !== bufferMargin) {
-                        marginEl.textContent = bufferMargin;
+                    if (marginEl) {
+                        if (marginEl.textContent !== bufferMargin) marginEl.textContent = bufferMargin;
+                        marginEl.className = `metric-val ${marginClass} buffer-margin-val`;
                     }
                     const deadlineEl = cardEl.querySelector('.deadline-val');
                     if (deadlineEl && deadlineEl.textContent !== deadlineFormatted) {
@@ -2023,7 +2099,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                             </div>
                             <div class="metric-row">
                                 <span class="metric-label">BUFFER MARGIN</span>
-                                <span class="metric-val metric-healthy buffer-margin-val">${bufferMargin}</span>
+                                <span class="metric-val ${marginClass} buffer-margin-val">${bufferMargin}</span>
                             </div>
                             <div class="metric-row">
                                 <span class="metric-label">DAILY PENALTY</span>
@@ -2154,13 +2230,18 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             const nodeList = Object.values(nodes);
             if (!nodeList.length) return;
 
-            const activeCount = nodeList.filter(n => !n.is_standby && n.status !== 'QUARANTINED').length;
+            const isMaintenance = n => n.status === 'OFFLINE' || n.status === 'MAINTENANCE' || (n.name && n.name.includes('Maintenance')) || (n.id === 'node-12' && !n.is_standby && !n.current_shot_id);
+            const activeCount = nodeList.filter(n => !n.is_standby && n.status !== 'QUARANTINED' && !isMaintenance(n)).length;
             const quarantinedCount = nodeList.filter(n => n.status === 'QUARANTINED').length;
-            const standbyCount = nodeList.filter(n => n.is_standby).length;
-            
-            const summaryText = (quarantinedCount > 0)
-                ? `${activeCount} ACTIVE / ${quarantinedCount} QUARANTINED / ${standbyCount} STANDBY`
-                : `${activeCount} ACTIVE / ${standbyCount} STANDBY`;
+            const standbyCount = nodeList.filter(n => n.is_standby && !isMaintenance(n)).length;
+            const maintenanceCount = nodeList.filter(n => isMaintenance(n)).length;
+
+            const summaryParts = [`${activeCount} ACTIVE`];
+            if (quarantinedCount > 0) summaryParts.push(`${quarantinedCount} QUARANTINED`);
+            summaryParts.push(`${standbyCount} STANDBY`);
+            if (maintenanceCount > 0) summaryParts.push(`${maintenanceCount} MAINTENANCE`);
+            const summaryText = summaryParts.join(' / ');
+
             if (summaryLabel && summaryLabel.innerText !== summaryText) {
                 summaryLabel.innerText = summaryText;
             }
@@ -2181,6 +2262,10 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     nodeClass += ' node-quarantined';
                     tempColor = 'var(--heat-fault)';
                     shotLabel = 'QUARANTINED (FAULT)';
+                } else if (isMaintenance(n)) {
+                    nodeClass += ' node-maintenance';
+                    tempColor = 'var(--text-dim)';
+                    shotLabel = 'MAINTENANCE';
                 } else if (n.is_standby) {
                     nodeClass += ' node-standby';
                     tempColor = 'var(--text-dim)';

@@ -38,6 +38,7 @@ class ApprovalRecord(BaseModel):
     mission_id: Optional[str] = None
     incident_id: Optional[str] = None
     incident_url: Optional[str] = None
+    incident_status: Optional[str] = None
     tier: int = 2
     tier_reason: str
     action_title: str
