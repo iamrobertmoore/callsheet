@@ -55,6 +55,14 @@ class ApprovalRecord(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     resolved_at: Optional[str] = None
     decision_reason: Optional[str] = None
+    # Tier 1 Move 1 evidence fields captured from Step 6 verification
+    tier1_target_node: Optional[str] = None
+    tier1_shot_id: Optional[str] = None
+    tier1_rate_sec: Optional[float] = None
+    tier1_temp_c: Optional[float] = None
+    tier1_log_line: Optional[str] = None
+    tier1_buffer_margin: Optional[float] = None
+    tier1_witnesses: Optional[list[str]] = None
 
 
 # Central in-memory registry of pending human producer approvals

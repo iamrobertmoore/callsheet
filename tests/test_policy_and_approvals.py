@@ -224,3 +224,159 @@ async def test_health_check_section_6_metadata():
         assert "cycle_epoch" in data
         assert "next_reset_at_utc" in data
         assert "pending_approvals" in data
+
+
+@pytest.mark.asyncio
+async def test_multi_mission_approval_isolation(monkeypatch):
+    """
+    Verifies that concurrent approval decisions on distinct missions remain strictly isolated.
+    Approving Mission A (Incident 101) and Declining Mission B (Incident 102) concurrently:
+    - Asserts that all activity notes, summaries, and resolutions for Mission A land in Incident 101.
+    - Asserts that all activity notes for Mission B land in Incident 102.
+    - Asserts no cross-incident contamination occurs.
+    """
+    import asyncio
+    from callsheet.web.app import mission_runner
+
+    PENDING_APPROVALS.clear()
+
+    approval_a = ApprovalRecord(
+        id="appr-A",
+        mission_id="mission-alpha",
+        incident_id="incident-101",
+        tier=2,
+        tier_reason="Cross-show pre-emption for Mission A",
+        action_title="Pre-empt node-08 for sh_204",
+        target_node_id="node-08",
+        source_node_id="node-03",
+        shot_id="sh_204",
+        preempted_shot_id="sh_301",
+        preempted_show_name="Abyssal Trench 3D",
+        plan_summary="Pre-empt node-08 for sh_204",
+        buffer_loss_rate="1.0 min buffer lost per minute of delay",
+        cost_of_waiting="Buffer erosion 1.0 min/min",
+        deadline_impact="Abyssal Trench margin stays protected",
+        status="PENDING",
+        tier1_target_node="node-11",
+        tier1_shot_id="sh_118",
+        tier1_rate_sec=20.0,
+        tier1_temp_c=63.5,
+        tier1_buffer_margin=2.8,
+        tier1_witnesses=["Loki", "Prometheus", "Tempo"],
+    )
+
+    approval_b = ApprovalRecord(
+        id="appr-B",
+        mission_id="mission-beta",
+        incident_id="incident-102",
+        tier=2,
+        tier_reason="Cross-show pre-emption for Mission B",
+        action_title="Pre-empt node-08 for sh_204",
+        target_node_id="node-08",
+        source_node_id="node-03",
+        shot_id="sh_204",
+        preempted_shot_id="sh_301",
+        preempted_show_name="Abyssal Trench 3D",
+        plan_summary="Pre-empt node-08 for sh_204",
+        buffer_loss_rate="1.0 min buffer lost per minute of delay",
+        cost_of_waiting="Buffer erosion 1.0 min/min",
+        deadline_impact="Abyssal Trench margin stays protected",
+        status="PENDING",
+        tier1_target_node="node-11",
+        tier1_shot_id="sh_118",
+        tier1_rate_sec=20.0,
+        tier1_temp_c=63.5,
+        tier1_buffer_margin=2.8,
+        tier1_witnesses=["Loki", "Prometheus", "Tempo"],
+    )
+
+    PENDING_APPROVALS[approval_a.id] = approval_a
+    PENDING_APPROVALS[approval_b.id] = approval_b
+
+    executed_calls = []
+
+    async def mock_execute_mcp_tool(toolset, tool_name, arguments):
+        executed_calls.append({"tool": tool_name, "args": arguments})
+        if tool_name == "create_annotation":
+            return {"id": 12345}
+        return {}
+
+    async def mock_verify_node_telemetry(**kwargs):
+        return {
+            "rate_sec": 19.0,
+            "temp_c": 64.2,
+            "log_line": "Frame 1203 rendered on node-08 successfully in 19.0s.",
+            "witnesses_accepted": ["Loki", "Prometheus", "Tempo"],
+        }
+
+    async def mock_wait_for_node_alert_cleared(**kwargs):
+        inc_id = kwargs.get("incident_id")
+        if inc_id:
+            executed_calls.append({
+                "tool": "add_activity_to_incident",
+                "args": {
+                    "incidentId": inc_id,
+                    "body": f"Grafana alert cleared for node-03 at 18:09:04 UTC.",
+                }
+            })
+        return ("2026-09-05T18:09:04Z", 4.2)
+
+    monkeypatch.setattr(mission_runner, "_execute_mcp_tool", mock_execute_mcp_tool)
+    monkeypatch.setattr(mission_runner, "_verify_node_telemetry", mock_verify_node_telemetry)
+    monkeypatch.setattr(mission_runner, "_wait_for_node_alert_cleared", mock_wait_for_node_alert_cleared)
+
+    # Execute approve on mission A and decline on mission B concurrently
+    res_a, res_b = await asyncio.gather(
+        mission_runner.handle_approval_decision("appr-A", "approve", "Approved by Lead Producer"),
+        mission_runner.handle_approval_decision("appr-B", "decline", "Declined by Executive Producer"),
+    )
+
+    assert res_a["status"] == "APPROVED"
+    assert res_a["incident_status"] == "resolved"
+    assert res_b["status"] == "DECLINED"
+    assert res_b["incident_status"] == "active"
+
+    # Analyze all MCP tool calls targeting incidents
+    inc_101_activities = []
+    inc_102_activities = []
+    inc_101_resolutions = []
+    inc_102_resolutions = []
+
+    for call in executed_calls:
+        tool = call["tool"]
+        args = call["args"]
+        if tool == "add_activity_to_incident":
+            target_inc = args.get("incidentId")
+            body = args.get("body", "")
+            if target_inc == "incident-101":
+                inc_101_activities.append(body)
+            elif target_inc == "incident-102":
+                inc_102_activities.append(body)
+            else:
+                pytest.fail(f"Unexpected incident target: {target_inc}")
+        elif tool == "update_incident":
+            target_inc = args.get("incidentId")
+            status = args.get("status")
+            if target_inc == "incident-101":
+                inc_101_resolutions.append(status)
+            elif target_inc == "incident-102":
+                inc_102_resolutions.append(status)
+            else:
+                pytest.fail(f"Unexpected incident update target: {target_inc}")
+
+    # Assertions for Incident 101 (Approved Mission A)
+    assert len(inc_101_activities) >= 3
+    assert any("Producer APPROVED Tier 2 Plan" in act for act in inc_101_activities)
+    assert any("Step 6 Post-Intervention Verification" in act for act in inc_101_activities)
+    assert any("Resolution Summary" in act for act in inc_101_activities)
+    assert not any("DECLINED" in act for act in inc_101_activities)
+    assert inc_101_resolutions == ["resolved"]
+
+    # Assertions for Incident 102 (Declined Mission B)
+    assert len(inc_102_activities) >= 1
+    assert any("Producer DECLINED Tier 2 Plan" in act for act in inc_102_activities)
+    assert not any("APPROVED" in act for act in inc_102_activities)
+    assert not any("Resolution Summary" in act for act in inc_102_activities)
+    assert inc_102_resolutions == []  # Never resolved, remains active
+
+    PENDING_APPROVALS.clear()

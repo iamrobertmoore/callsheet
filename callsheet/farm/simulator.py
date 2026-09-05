@@ -246,7 +246,7 @@ class RenderFarmSimulator:
             node12 = self.state.nodes["node-12"]
             node12.is_standby = False
             node12.status = NodeStatus.OFFLINE
-            node12.name = "Farm-Worker-12 (Maintenance)"
+            node12.name = "Farm-Worker-12"
             node12.current_shot_id = None
             node12.current_frame = None
 
@@ -389,8 +389,6 @@ class RenderFarmSimulator:
             shot.current_seconds_per_frame = 40.0  # Degraded render rate
         else:
             target_node.status = NodeStatus.HEALTHY
-            if target_node_id == "node-12":
-                target_node.name = "Farm-Worker-12 (Standby Active)"
             target_node.temperature_celsius = round(random.uniform(60.0, 66.0), 1)
             shot.current_seconds_per_frame = shot.estimated_seconds_per_frame  # Normal speed restored
 

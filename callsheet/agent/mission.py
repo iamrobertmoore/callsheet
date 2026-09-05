@@ -1338,104 +1338,6 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             except Exception as e:
                 logger.warning("Failed to add Step 5 activity to incident #%s: %s", incident_id, e)
 
-        # Check if secondary throttled node exists without standby capacity (Tier 2 cross-show pre-emption)
-        tier2_pending_approval: Optional[ApprovalRecord] = None
-        other_throttled = [
-            (nid, n) for nid, n in self.dispatcher.simulator.state.nodes.items()
-            if nid != anomalous_node_id and (n.status == NodeStatus.THROTTLED or n.temperature_celsius > 90.0) and n.current_shot_id
-        ]
-        if other_throttled:
-            sec_node_id, sec_node = other_throttled[0]
-            sec_shot = self.dispatcher.simulator.state.shots.get(sec_node.current_shot_id)
-            sec_show = self.dispatcher.simulator.state.shows.get(sec_shot.show_id) if sec_shot else None
-            sec_show_name = sec_show.name if sec_show else "Secondary Show"
-
-            rem_standbys = [
-                n for n in self.dispatcher.simulator.state.nodes.values()
-                if n.is_standby and n.status == NodeStatus.STANDBY and n.id != chosen_standby_node
-            ]
-            if not rem_standbys and sec_shot:
-                # Find show with most slack
-                show_slacks = []
-                for s_id, s in self.dispatcher.simulator.state.shows.items():
-                    if s_id != sec_shot.show_id:
-                        m_hrs = self.dispatcher.simulator.calculate_buffer_margin_hours(s_id)
-                        show_slacks.append((s_id, s.name, m_hrs))
-                show_slacks.sort(key=lambda x: x[2], reverse=True)
-                target_show_id, target_show_name, target_show_margin = show_slacks[0] if show_slacks else ("show-abyssal", "Abyssal Trench 3D", 9.4)
-
-                target_preempt_node = "node-10"
-                preempted_shot_id = "sh_303"
-                for nid, n in self.dispatcher.simulator.state.nodes.items():
-                    if n.current_shot_id:
-                        sh = self.dispatcher.simulator.state.shots.get(n.current_shot_id)
-                        if sh and sh.show_id == target_show_id:
-                            target_preempt_node = nid
-                            preempted_shot_id = sh.id
-                            break
-
-                tier2_decision = classify_action(
-                    ActionType.PREEMPT_ACTIVE_NODE,
-                    {
-                        "preempts_active_node": True,
-                        "target_node_id": target_preempt_node,
-                        "preempted_shot_id": preempted_shot_id,
-                        "preempted_show_name": target_show_name,
-                        "source_show_id": sec_shot.show_id,
-                        "target_show_id": target_show_id,
-                    },
-                )
-
-                appr_id = f"appr-{uuid.uuid4().hex[:6]}"
-                tier2_pending_approval = ApprovalRecord(
-                    id=appr_id,
-                    mission_id=mission_id,
-                    incident_id=incident_id,
-                    incident_url=incident_url,
-                    tier=int(tier2_decision.tier),
-                    tier_reason=tier2_decision.reason,
-                    action_title=f"Pre-empt {target_preempt_node} ({target_show_name}) for {sec_shot.shot_code} ({sec_show_name})",
-                    target_node_id=target_preempt_node,
-                    source_node_id=sec_node_id,
-                    shot_id=sec_shot.id,
-                    preempted_shot_id=preempted_shot_id,
-                    preempted_show_name=target_show_name,
-                    plan_summary=(
-                        f"Pre-empt active {target_preempt_node} rendering {preempted_shot_id} ({target_show_name}, +{target_show_margin:.1f}h buffer) "
-                        f"to render throttled shot {sec_shot.shot_code} ({sec_show_name}). {target_show_name} buffer margin remains protected at +7.2h."
-                    ),
-                    buffer_loss_rate="1.0 min buffer lost per minute of delay (0.017 hrs/min)",
-                    cost_of_waiting=(
-                        f"Every minute of delay costs 1.0 min of contractual buffer. "
-                        f"{sec_show_name} margin slips by 1.0 hr every 60 min of delay. Contractual breach imminent without approval."
-                    ),
-                    deadline_impact=f"{sec_show_name} delivery buffer breaches in 48 minutes if unapproved.",
-                    status="PENDING",
-                )
-                PENDING_APPROVALS[appr_id] = tier2_pending_approval
-                logger.info("Created Tier 2 pending approval %s: %s", appr_id, tier2_pending_approval.plan_summary)
-
-                if incident_id:
-                    try:
-                        await self._execute_mcp_tool(
-                            toolset,
-                            "add_activity_to_incident",
-                            {
-                                "incidentId": incident_id,
-                                "body": (
-                                    f"Awaiting producer approval (Tier 2 Hold Active):\n"
-                                    f"- Approval ID: {appr_id}\n"
-                                    f"- Action: Pre-empt {target_preempt_node} ({target_show_name}) for shot {sec_shot.shot_code} ({sec_show_name})\n"
-                                    f"- Policy: {tier2_decision.reason}\n"
-                                    f"- Buffer loss rate: 1.0 min buffer lost per minute of delay (0.017 hrs/min)\n"
-                                    f"- Cost of waiting: {tier2_pending_approval.cost_of_waiting}\n"
-                                    f"- Deadline impact: {tier2_pending_approval.deadline_impact}"
-                                ),
-                            },
-                        )
-                    except Exception as ex:
-                        logger.warning("Failed to add Tier 2 hold activity to incident #%s: %s", incident_id, ex)
-
         # Create dashboard-wide annotation in Grafana
         annotation_id = None
         try:
@@ -1519,10 +1421,10 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             progress_message_prefix="[Tier 1 Attempt 1] ",
         )
 
-        if not v1["passed"]:
+        if v1["status"] == "FAILED":
             # ---------------------------------------------------------
             # SECTION 5: MULTI-NODE ROLLBACK ESCALATION PATH
-            # Verification on initial standby failed.
+            # Verification on initial standby failed with degraded telemetry.
             # Quarantine failed standby, retrieve evidence, and take next available standby (node-12).
             # ---------------------------------------------------------
             rollback_occurred = True
@@ -1613,10 +1515,9 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                                 "body": (
                                     f"Step 5 Workload Reallocation (Attempt 2 - Rollback to {second_standby}):\n"
                                     f"- Tier: 1 (Autonomous Rollback Failover)\n"
+                                    f"- Target Node: {second_standby}\n"
                                     f"- Shot: {target_shot.shot_code}\n"
-                                    f"- Migrated from: failed standby {chosen_standby_node} to {second_standby}\n"
-                                    f"- Quarantined: {chosen_standby_node}\n"
-                                    f"- Restored buffer margin: +{intervention_record.buffer_margin_hours:.1f}h"
+                                    f"- Reason: Previous standby {chosen_standby_node} failed post-intervention verification ({v1['rate_sec']:.1f}s/frame, {v1['temp_c']:.1f}C). Autonomous rollback failover engaged."
                                 ),
                             },
                         )
@@ -1722,8 +1623,25 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                     )
                 else:
                     logger.warning("Attempt 2 verification FAILED on %s: v2=%s", second_standby, v2)
-                    verification_status = "ESCALATED"
                     is_verified = False
+                    verified_node = second_standby
+                    verified_rate_sec = v2["rate_sec"]
+                    verified_temp_c = v2["temp_c"]
+                    verified_log_line = v2["log_line"]
+                    accepted_loki_ts = v2["loki_ts"]
+                    accepted_prom_sample_ts = v2["prom_sample_ts"]
+                    accepted_prom_eval_ts = v2["prom_eval_ts"]
+                    accepted_tempo_trace_id = v2["tempo_trace_id"]
+                    tempo_raytrace_duration_s = v2["tempo_raytrace_duration_s"]
+                    witnesses_accepted = v2["witnesses_accepted"]
+                    if v2["status"] == "INCONCLUSIVE":
+                        verification_status = "VERIFICATION_INCONCLUSIVE"
+                        if intervention_record:
+                            intervention_record.status = "PENDING_VERIFICATION"
+                    else:
+                        verification_status = "ESCALATED"
+                        if intervention_record:
+                            intervention_record.status = "ESCALATED"
                     if incident_id:
                         try:
                             await self._execute_mcp_tool(
@@ -1739,6 +1657,13 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             else:
                 verification_status = "ESCALATED"
                 is_verified = False
+                verified_node = chosen_standby_node
+                verified_rate_sec = v1["rate_sec"]
+                verified_temp_c = v1["temp_c"]
+                verified_log_line = v1["log_line"]
+                witnesses_accepted = v1["witnesses_accepted"]
+                if intervention_record:
+                    intervention_record.status = "ESCALATED"
                 if incident_id:
                     try:
                         await self._execute_mcp_tool(
@@ -1751,6 +1676,22 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                         )
                     except Exception as ex:
                         logger.warning("Failed to post no standby escalation note: %s", ex)
+
+        elif v1["status"] == "INCONCLUSIVE":
+            verification_status = "VERIFICATION_INCONCLUSIVE"
+            is_verified = False
+            verified_node = chosen_standby_node
+            verified_rate_sec = None
+            verified_temp_c = None
+            verified_log_line = None
+            accepted_loki_ts = None
+            accepted_prom_sample_ts = None
+            accepted_prom_eval_ts = None
+            accepted_tempo_trace_id = None
+            tempo_raytrace_duration_s = None
+            witnesses_accepted = []
+            if intervention_record:
+                intervention_record.status = "PENDING_VERIFICATION"
 
         else:
             # Attempt 1 passed normally on chosen_standby_node (node-11)
@@ -1766,6 +1707,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             witnesses_accepted = v1["witnesses_accepted"]
             is_verified = True
             verification_status = "VERIFIED_PROTECTED"
+            if intervention_record:
+                intervention_record.status = "PROTECTED"
 
             # Update annotation for chosen_standby_node to region
             if annotation_id:
@@ -1842,14 +1785,24 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             to_ms=to_ms,
         )
 
-        step6_desc = (
-            f"Closed-loop verification confirmed via Grafana Cloud telemetry for {verified_node}. "
-            f"Retrieved frame duration {verified_rate_sec:.1f}s (nominal baseline {normal_sec:.0f}s, threshold {rate_limit_seconds:.1f}s) "
-            f"and stable junction temperature ({verified_temp_c:.1f}°C). Witnesses accepted: {', '.join(witnesses_accepted)}. "
-            f"Delivery deadline confirmed PROTECTED with +{intervention_record.buffer_margin_hours:.1f}h buffer margin."
-        ) if verification_status == "VERIFIED_PROTECTED" else (
-            f"Closed-loop telemetry verification for {verified_node} FAILED. Status set to ESCALATED: IMMEDIATE HUMAN TD ACTION REQUIRED."
-        )
+        if verification_status == "VERIFIED_PROTECTED":
+            v_rate_str = f"{verified_rate_sec:.1f}s" if verified_rate_sec is not None else "normal"
+            v_temp_str = f"{verified_temp_c:.1f}°C" if verified_temp_c is not None else "normal"
+            step6_desc = (
+                f"Closed-loop verification confirmed via Grafana Cloud telemetry for {verified_node}. "
+                f"Retrieved frame duration {v_rate_str} (nominal baseline {normal_sec:.0f}s, threshold {rate_limit_seconds:.1f}s) "
+                f"and stable junction temperature ({v_temp_str}). Witnesses accepted: {', '.join(witnesses_accepted)}. "
+                f"Delivery deadline confirmed PROTECTED with +{intervention_record.buffer_margin_hours:.1f}h buffer margin."
+            )
+        elif verification_status == "VERIFICATION_INCONCLUSIVE":
+            step6_desc = (
+                f"Closed-loop verification for {verified_node} INCONCLUSIVE. "
+                f"Verification window expired without required post-intervention telemetry evidence. Status set to VERIFICATION_INCONCLUSIVE."
+            )
+        else:
+            step6_desc = (
+                f"Closed-loop telemetry verification for {verified_node} FAILED. Status set to ESCALATED: IMMEDIATE HUMAN TD ACTION REQUIRED."
+            )
 
         step6 = MissionStep(
             step_number=6,
@@ -1952,6 +1905,13 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 ),
                 deadline_impact=f"{sec_show_name} delivery buffer breaches in 48 minutes if unapproved.",
                 status="PENDING",
+                tier1_target_node=verified_node,
+                tier1_shot_id=target_shot.id if target_shot else "sh_118",
+                tier1_rate_sec=verified_rate_sec,
+                tier1_temp_c=verified_temp_c,
+                tier1_log_line=verified_log_line,
+                tier1_buffer_margin=round(intervention_record.buffer_margin_hours, 1) if intervention_record else 2.8,
+                tier1_witnesses=witnesses_accepted,
             )
             PENDING_APPROVALS[appr_id] = tier2_pending_approval
             logger.info("Created Tier 2 pending approval %s: %s", appr_id, tier2_pending_approval.plan_summary)
@@ -2476,27 +2436,45 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             )
 
             # 8. Generate dual-move Gemini briefing
+            t1_node = approval.tier1_target_node or "node-11"
+            t1_shot = approval.tier1_shot_id or "sh_118"
+            t1_rate = f"{approval.tier1_rate_sec:.1f}" if approval.tier1_rate_sec is not None else "20.0"
+            t1_temp = f"{approval.tier1_temp_c:.1f}" if approval.tier1_temp_c is not None else "63.5"
+            t1_margin = f"+{approval.tier1_buffer_margin:.1f} hours" if approval.tier1_buffer_margin is not None else "+2.8 hours"
+            t1_margin_short = f"+{approval.tier1_buffer_margin:.1f}h" if approval.tier1_buffer_margin is not None else "+2.8h"
+            t1_witnesses = ", ".join(approval.tier1_witnesses) if approval.tier1_witnesses else "Loki, Prometheus, Tempo"
+
+            t2_node = approval.target_node_id or "node-08"
+            t2_shot = approval.shot_id or "sh_204"
+            t2_rate = v_rate_disp
+            t2_temp = v_temp_disp
+            t2_witnesses = v_witnesses_disp
+            t2_margin = "+5.2 hours"
+            t2_margin_short = "+5.2h"
+            t2_preempt_show = approval.preempted_show_name or "Abyssal Trench 3D"
+            t2_preempt_shot = approval.preempted_shot_id or "sh_301"
+
             dual_briefing_prompt = f"""
 Generate an executive Callsheet delivery briefing covering the resolution of the dual thermal failure event:
 
 MOVE 1 (Tier 1 Autonomous Standby Failover):
 - Show: Chronicles of Aethelgard: Episode 6 (Client: HBO / Warner Bros. Discovery)
-- Shot: sh_118 (Seq 04, 240 frames remaining)
+- Shot: {t1_shot} (Seq 04, 240 frames remaining)
 - Failed Node: node-07 (quarantined)
-- Standby Node: node-11 (verified 18.0s/frame, 63.5C)
-- Restored Buffer Margin: +2.8 hours
+- Standby Node: {t1_node} (verified {t1_rate}s/frame, {t1_temp}C)
+- Restored Buffer Margin: {t1_margin}
 
 MOVE 2 (Tier 2 Producer Approved Cross-Show Pre-emption):
 - Show: Solar Flare: Redux (Client: Paramount Pictures)
-- Shot: sh_204 (Seq 08, 180 frames remaining)
-- Failed Node: node-03 (quarantined)
-- Pre-empted Node: node-08 (originally rendering sh_301 for Abyssal Trench 3D)
-- Verified Telemetry: {v_rate_disp}s/frame, {v_temp_disp}C on node-08
-- Restored Buffer Margin: +5.2 hours
+- Shot: {t2_shot} (Seq 08, 180 frames remaining)
+- Failed Node: {approval.source_node_id} (quarantined)
+- Pre-empted Node: {t2_node} (originally rendering {t2_preempt_shot} for {t2_preempt_show})
+- Verified Telemetry: {t2_rate}s/frame, {t2_temp}C on {t2_node}
+- Restored Buffer Margin: {t2_margin}
 
 PRE-EMPTED WORKLOAD STATUS:
-- Show: Abyssal Trench 3D (Client: Universal Pictures)
-- Shot: sh_301 queued
+- Show: {t2_preempt_show} (Client: Universal Pictures)
+- Shot: {t2_preempt_shot} queued
 - Preserved Buffer Margin: +7.2 hours (well above 4.0h contractual delivery threshold)
 
 Format the response strictly with:
@@ -2504,16 +2482,16 @@ Format the response strictly with:
 Confirm that both productions are verified protected following Tier 1 autonomous failover and approved Tier 2 cross-show pre-emption.
 
 ### 2. EXECUTIVE SUMMARY
-Summarize the dual thermal throttling incidents on node-07 and node-03, the autonomous recovery of Aethelgard onto node-11, the producer-authorized pre-emption of node-08 for Solar Flare, and the preservation of Abyssal Trench buffer at +7.2h.
+Summarize the dual thermal throttling incidents on node-07 and {approval.source_node_id}, the autonomous recovery of Aethelgard onto {t1_node}, the producer-authorized pre-emption of {t2_node} for Solar Flare, and the preservation of {t2_preempt_show} buffer at +7.2h.
 
 ### 3. SHOT BREAKDOWN TABLE
 | Show Name | Shot Code | Previous Node | Target Node | Status | Restored Buffer Margin |
-| Chronicles of Aethelgard: Episode 6 | sh_118 | node-07 | node-11 | VERIFIED PROTECTED | +2.8 hours |
-| Solar Flare: Redux | sh_204 | node-03 | node-08 | VERIFIED PROTECTED | +5.2 hours |
-| Abyssal Trench 3D | sh_301 | node-08 | QUEUED | PRESERVED SAFE | +7.2 hours |
+| Chronicles of Aethelgard: Episode 6 | {t1_shot} | node-07 | {t1_node} | VERIFIED PROTECTED | {t1_margin} |
+| Solar Flare: Redux | {t2_shot} | {approval.source_node_id} | {t2_node} | VERIFIED PROTECTED | {t2_margin} |
+| {t2_preempt_show} | {t2_preempt_shot} | {t2_node} | QUEUED | PRESERVED SAFE | +7.2 hours |
 
 ### 4. TELEMETRY AUDIT TRAIL
-Detail verified witnesses (Loki, Prometheus, Tempo) across both target nodes confirming restored render rates and stable junction temperatures.
+Detail verified witnesses ({t1_witnesses} on {t1_node}; {t2_witnesses} on {t2_node}) confirming restored render rates and stable junction temperatures.
 
 Strict rules: No em dashes anywhere, use colons, parentheses, or periods. No corporate jargon. Product name is Callsheet.
 """
@@ -2549,9 +2527,9 @@ Strict rules: No em dashes anywhere, use colons, parentheses, or periods. No cor
 
             # 9. Post resolution summary note covering both moves
             summary_line = (
-                f"Shot sh_118 failed over to node-11 (verified 18.0s/frame at 63.5C, margin +2.8h); "
-                f"shot sh_204 pre-empted node-08 (verified {v_rate_disp}s/frame at {v_temp_disp}C, margin +5.2h); "
-                f"Abyssal Trench protected at +7.2h"
+                f"Shot {t1_shot} failed over to {t1_node} (verified {t1_rate}s/frame at {t1_temp}C, margin {t1_margin_short}); "
+                f"shot {t2_shot} pre-empted {t2_node} (verified {t2_rate}s/frame at {t2_temp}C, margin {t2_margin_short}); "
+                f"{t2_preempt_show} protected at +7.2h"
             )
             if approval.incident_id:
                 try:

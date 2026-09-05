@@ -42,12 +42,52 @@ worker = FarmWorker(
 )
 
 
+_mcp_health_cache = {
+    "timestamp": 0.0,
+    "reachable": True,
+    "error": None,
+}
+
+
+async def _background_health_probe_loop():
+    """Background task continuously refreshing the MCP list_datasources probe every 10 seconds."""
+    while True:
+        mcp_reachable = True
+        mcp_error = None
+        try:
+            params = get_grafana_mcp_connection_params()
+            toolset = create_grafana_mcp_toolset(params)
+            res = await toolset._execute_with_session(
+                lambda session: session.call_tool("list_datasources", {}),
+                "List datasources health check"
+            )
+            if getattr(res, "isError", False):
+                mcp_reachable = False
+                mcp_error = "list_datasources returned error response"
+        except Exception as ex:
+            mcp_reachable = False
+            mcp_error = str(ex)
+        _mcp_health_cache["timestamp"] = time.monotonic()
+        _mcp_health_cache["reachable"] = mcp_reachable
+        _mcp_health_cache["error"] = mcp_error
+        try:
+            await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+            break
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Start continuous background farm emitter and autonomous watchdog
     await worker.start()
+    probe_task = asyncio.create_task(_background_health_probe_loop())
     yield
-    # Stop emitter on shutdown
+    # Stop background tasks on shutdown
+    probe_task.cancel()
+    try:
+        await probe_task
+    except asyncio.CancelledError:
+        pass
     await worker.stop()
 
 
@@ -83,45 +123,11 @@ class ApprovalDecisionRequest(BaseModel):
     reason: Optional[str] = None
 
 
-_mcp_health_cache = {
-    "timestamp": 0.0,
-    "reachable": True,
-    "error": None,
-}
-_mcp_health_lock = asyncio.Lock()
-
-
 @app.get("/api/health")
 async def health_check():
-    # Live MCP reachability check using cached list_datasources probe (10s TTL)
-    now_mono = time.monotonic()
-    if (now_mono - _mcp_health_cache["timestamp"]) < 10.0:
-        mcp_reachable = _mcp_health_cache["reachable"]
-        mcp_error = _mcp_health_cache["error"]
-    else:
-        async with _mcp_health_lock:
-            if (time.monotonic() - _mcp_health_cache["timestamp"]) < 10.0:
-                mcp_reachable = _mcp_health_cache["reachable"]
-                mcp_error = _mcp_health_cache["error"]
-            else:
-                mcp_reachable = True
-                mcp_error = None
-                try:
-                    params = get_grafana_mcp_connection_params()
-                    toolset = create_grafana_mcp_toolset(params)
-                    res = await toolset._execute_with_session(
-                        lambda session: session.call_tool("list_datasources", {}),
-                        "List datasources health check"
-                    )
-                    if getattr(res, "isError", False):
-                        mcp_reachable = False
-                        mcp_error = "list_datasources returned error response"
-                except Exception as ex:
-                    mcp_reachable = False
-                    mcp_error = str(ex)
-                _mcp_health_cache["timestamp"] = time.monotonic()
-                _mcp_health_cache["reachable"] = mcp_reachable
-                _mcp_health_cache["error"] = mcp_error
+    # Read live MCP reachability from asynchronous background probe (refreshed every 10s)
+    mcp_reachable = _mcp_health_cache["reachable"]
+    mcp_error = _mcp_health_cache["error"]
 
     grafana_url = os.getenv("GRAFANA_URL", "https://bigforest2172.grafana.net")
     parsed_host = urllib.parse.urlparse(grafana_url).netloc
