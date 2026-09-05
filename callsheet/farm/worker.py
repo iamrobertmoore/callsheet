@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from callsheet.agent.alerting import ensure_alert_rule, get_alert_rule, PRODUCTION_ALERT_RULE_UID
 from callsheet.farm.emitter import FarmTelemetryEmitter, get_deployment_id
-from callsheet.farm.models import NodeStatus, ScenarioType
+from callsheet.farm.models import NodeStatus, ScenarioType, PENDING_APPROVALS
 from callsheet.farm.simulator import RenderFarmSimulator
 from callsheet.mcp.client import create_grafana_mcp_toolset, get_grafana_mcp_connection_params
 
@@ -115,18 +115,34 @@ class FarmWorker:
         self.tick_cadence_history: List[Dict[str, Any]] = []
         self._last_tick_start: Optional[float] = None
 
-        # Section 3: Alert-Driven Autonomous Loop and telemetry metadata
+        # Section 3 & 6: Alert-Driven Autonomous Loop and telemetry metadata
         self.deployment_id: str = get_deployment_id()
         self.alert_rule_uid: Optional[str] = (
             PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else None
         )
         self.alert_rule_status: str = "initializing"
+        self.alert_rule_state: str = "Normal"
         self.alert_rule_error: Optional[str] = None
         self.scenario_primed_by: str = "instance_start"
         self.scenario_primed_at: str = datetime.now(timezone.utc).isoformat()
         self.fault_injected_at: Optional[float] = time.time()
         self.alert_firing_observed_at: Optional[float] = None
         self.mission_started_at: Optional[float] = None
+
+        # Section 6 metadata tracking
+        self.last_mission_at: Optional[str] = None
+        self.last_mission_trigger: Optional[str] = None
+        self.last_verification_status: Optional[str] = None
+
+    @property
+    def current_cycle_epoch(self) -> int:
+        now_ts = int(time.time())
+        return int(now_ts // self.cycle_interval_seconds)
+
+    @property
+    def next_reset_at_utc(self) -> str:
+        next_ts = (self.current_cycle_epoch + 1) * self.cycle_interval_seconds
+        return datetime.fromtimestamp(next_ts, tz=timezone.utc).isoformat()
 
     @property
     def alert_pending(self) -> bool:
@@ -245,6 +261,7 @@ class FarmWorker:
                     self.mission_started_at = None
                     self.simulator.reset_cycle()
                     self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+                    PENDING_APPROVALS.clear()
 
                 # 1. Advance simulation state tracking wall time (capped at 30 seconds)
                 delta_sec = min(30.0, max(0.1, interval)) if interval is not None else self.tick_interval_seconds
@@ -305,9 +322,11 @@ class FarmWorker:
         try:
             rule_data = await get_alert_rule(toolset, self.alert_rule_uid)
             self.alert_rule_status = "ok"
+            self.alert_rule_state = rule_data.get("state", "Normal")
             self.alert_rule_error = None
         except Exception as ex:
             self.alert_rule_status = "error"
+            self.alert_rule_state = "unknown"
             self.alert_rule_error = str(ex)
             logger.warning("Failed to poll Grafana alert rule %s: %s (failing closed)", self.alert_rule_uid, ex)
             return
@@ -385,6 +404,9 @@ class FarmWorker:
             )
             self.missions_this_instance += 1
             self.latest_mission = res.model_dump(mode="json")
+            self.last_mission_at = res.timestamp.isoformat() if hasattr(res.timestamp, "isoformat") else str(res.timestamp)
+            self.last_mission_trigger = "grafana_alert"
+            self.last_verification_status = getattr(res, "verification_status", None)
             logger.info("Autonomous mission completed successfully for %s (trigger: grafana_alert)", target_node_id)
         except Exception as ex:
             logger.error("Autonomous mission execution failed: %s", ex, exc_info=True)
@@ -436,6 +458,9 @@ class FarmWorker:
             )
             self.missions_this_instance += 1
             self.latest_mission = res.model_dump(mode="json")
+            self.last_mission_at = res.timestamp.isoformat() if hasattr(res.timestamp, "isoformat") else str(res.timestamp)
+            self.last_mission_trigger = trigger_type
+            self.last_verification_status = getattr(res, "verification_status", None)
             return self.latest_mission
         finally:
             self.is_investigating = False

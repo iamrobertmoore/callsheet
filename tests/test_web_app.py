@@ -143,9 +143,10 @@ async def test_alert_pending_and_cleared_badge():
         data_throttled = res_throttled.json()
         assert data_throttled["alert_pending"] is True
 
-        # SSR should show GRAFANA ALERT PENDING
+        # SSR should show Grafana alert pending and Grafana evaluates every minute
         res_html = await client.get("/")
-        assert "GRAFANA ALERT PENDING" in res_html.text
+        assert "Grafana alert pending" in res_html.text
+        assert "Grafana evaluates every minute" in res_html.text
 
         # 3. Verify ALERT CLEARED badge rendering in SSR when latest_mission has quarantine_to_alert_cleared_seconds
         sample_mission = dict(worker.latest_mission)

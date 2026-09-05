@@ -13,14 +13,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
 from callsheet.agent.mission import MultiStepMissionRunner, MISSION_PANEL_IMAGES
-from callsheet.farm.models import ScenarioType, ShotStatus
+from callsheet.farm.models import ScenarioType, ShotStatus, PENDING_APPROVALS, ApprovalRecord
 from callsheet.farm.simulator import RenderFarmSimulator
 from callsheet.farm.worker import FarmWorker
 from callsheet.interventions.dispatcher import InterventionDispatcher
+from callsheet.mcp.client import create_grafana_mcp_toolset, get_grafana_mcp_connection_params
 
 # Global singleton instances
 simulator = RenderFarmSimulator()
@@ -74,23 +76,101 @@ class MissionRequest(BaseModel):
     scenario_primed_by: Optional[str] = None
 
 
+class ApprovalDecisionRequest(BaseModel):
+    decision: str
+    reason: Optional[str] = None
+
+
 @app.get("/api/health")
 async def health_check():
-    is_healthy = (worker.alert_rule_status != "error")
-    return {
+    # Live MCP reachability check using real list_datasources call
+    mcp_reachable = True
+    mcp_error = None
+    try:
+        params = get_grafana_mcp_connection_params()
+        toolset = create_grafana_mcp_toolset(params)
+        res = await toolset._execute_with_session(
+            lambda session: session.call_tool("list_datasources", {}),
+            "List datasources health check"
+        )
+        if getattr(res, "isError", False):
+            mcp_reachable = False
+            mcp_error = "list_datasources returned error response"
+    except Exception as ex:
+        mcp_reachable = False
+        mcp_error = str(ex)
+
+    grafana_url = os.getenv("GRAFANA_URL", "https://bigforest2172.grafana.net")
+    parsed_host = urllib.parse.urlparse(grafana_url).netloc
+    grafana_stack = parsed_host.split(".")[0] if parsed_host else "bigforest2172"
+
+    is_healthy = (worker.alert_rule_status != "error") and mcp_reachable
+    pending_list = [a.model_dump(mode="json") for a in PENDING_APPROVALS.values() if a.status == "PENDING"]
+
+    data = {
         "status": "healthy" if is_healthy else "degraded",
         "service": "callsheet",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "agent_runtime": "live",
+        "replay_mode": False,
+        "mcp_server": "grafana/mcp-grafana v1.2.0, self-hosted sidecar",
+        "mcp_transport": "streamable-http",
+        "mcp_reachable": mcp_reachable,
+        "grafana_stack": grafana_stack,
+        "alert_rule_uid": worker.alert_rule_uid or "cfxbt56wwbocge",
+        "alert_rule_state": worker.alert_rule_state,
+        "alert_rule_interval_configured": "10s",
+        "alert_rule_interval_observed": "60s",
+        "model": mission_runner.model_name,
+        "model_location": mission_runner.location,
+        "last_mission_at": worker.last_mission_at,
+        "last_mission_trigger": worker.last_mission_trigger,
+        "last_verification_status": worker.last_verification_status,
+        "cycle_epoch": worker.current_cycle_epoch,
+        "next_reset_at_utc": worker.next_reset_at_utc,
+        "pending_approvals": pending_list,
+        # Baseline / backward-compatible health fields
         "worker_running": worker._running,
         "instance_started_at": worker.instance_started_at,
         "missions_this_instance": worker.missions_this_instance,
         "deployment_id": worker.deployment_id,
         "alert_rule_status": worker.alert_rule_status,
-        "alert_rule_uid": worker.alert_rule_uid,
         "alert_rule_error": worker.alert_rule_error,
         "scenario_primed_by": worker.scenario_primed_by,
         "tick_cadence": worker.tick_cadence_stats,
     }
+    if mcp_error:
+        data["mcp_error"] = mcp_error
+    return data
+
+
+@app.get("/api/approvals")
+async def list_approvals():
+    """Returns all recorded producer approvals and pending requests."""
+    return [a.model_dump(mode="json") for a in PENDING_APPROVALS.values()]
+
+
+@app.post("/api/approvals/{approval_id}")
+async def decide_approval(approval_id: str, req: ApprovalDecisionRequest):
+    """Processes a producer's approval or decline decision for a Tier 2 action."""
+    if approval_id not in PENDING_APPROVALS:
+        raise HTTPException(status_code=404, detail=f"Approval request {approval_id} not found.")
+
+    res = await mission_runner.handle_approval_decision(
+        approval_id=approval_id,
+        decision=req.decision,
+        reason=req.reason,
+    )
+    if req.decision.lower() == "approve":
+        if worker.latest_mission:
+            worker.latest_mission["verification_status"] = "VERIFIED_PROTECTED"
+            worker.latest_mission["incident_status"] = "resolved"
+    else:
+        if worker.latest_mission:
+            worker.latest_mission["verification_status"] = "ESCALATED"
+            worker.latest_mission["incident_status"] = "escalated"
+
+    return res
 
 
 @app.get("/api/state")
@@ -112,6 +192,9 @@ async def get_farm_state():
         "alert_rule_status": worker.alert_rule_status,
         "alert_rule_uid": worker.alert_rule_uid,
         "tick_cadence": worker.tick_cadence_stats,
+        "pending_approvals": [a.model_dump(mode="json") for a in PENDING_APPROVALS.values()],
+        "cycle_epoch": worker.current_cycle_epoch,
+        "next_reset_at_utc": worker.next_reset_at_utc,
     }
     return JSONResponse(
         content=content,
@@ -1369,6 +1452,109 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             margin-right: auto;
         }
 
+        /* Authority & Blast Radius Policy Panel */
+        .authority-section {
+            margin-bottom: 24px;
+        }
+        .authority-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+        .authority-card {
+            background: var(--surface);
+            border: 1px solid var(--rule);
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .authority-badge {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .tier-1-badge { color: var(--accent); }
+        .tier-2-badge { color: var(--heat-warm); }
+        .tier-3-badge { color: var(--state-critical); }
+        .authority-text {
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-dim);
+            margin: 0;
+        }
+
+        /* Tier 2 Approval Card */
+        .approval-banner {
+            background: rgba(210, 153, 34, 0.12);
+            border: 1px solid var(--state-warning);
+            padding: 16px 20px;
+            margin-bottom: 24px;
+            animation: fadeIn 0.3s ease-out;
+        }
+        .approval-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .approval-badge {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            color: #e3b341;
+        }
+        .approval-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+        }
+        .approval-plan {
+            font-size: 13px;
+            color: var(--text-light);
+            line-height: 1.5;
+            margin-bottom: 12px;
+        }
+        .approval-arithmetic {
+            background: #080c12;
+            border: 1px solid var(--rule);
+            padding: 10px 14px;
+            font-size: 12px;
+            color: #79c0ff;
+            line-height: 1.6;
+            margin-bottom: 14px;
+        }
+        .approval-controls {
+            display: flex;
+            gap: 12px;
+        }
+        .btn-approve {
+            background: #238636;
+            color: #ffffff;
+            border: 1px solid #2ea043;
+            padding: 8px 18px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .btn-approve:hover { background: #2ea043; }
+        .btn-decline {
+            background: #21262d;
+            color: #f85149;
+            border: 1px solid rgba(248, 81, 73, 0.4);
+            padding: 8px 18px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .btn-decline:hover { background: rgba(248, 81, 73, 0.25); }
+
         @media (prefers-reduced-motion: reduce) {
             * {
                 animation-duration: 0.01ms !important;
@@ -1423,6 +1609,11 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
 <!-- SSR_DELIVERY_BANNER -->
 
+        <!-- Pending Approval Notice Container -->
+        <div id="approval-card-container">
+<!-- SSR_APPROVAL_CARD -->
+        </div>
+
         <!-- Active Delivery Slate -->
         <section class="slate-section">
             <div class="section-header">
@@ -1431,6 +1622,28 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             </div>
             <div id="slate-container" class="slate-grid">
 <!-- SSR_SLATE -->
+            </div>
+        </section>
+
+        <!-- Authority & Blast Radius Policy Panel -->
+        <section class="authority-section">
+            <div class="section-header">
+                <span class="section-title">Authority & Blast Radius Policy</span>
+                <span class="section-sub">AUTONOMOUS DISPATCH TIERS & OPERATIONAL BOUNDARIES</span>
+            </div>
+            <div class="authority-grid">
+                <div class="authority-card">
+                    <div class="authority-badge tier-1-badge">Tier 1 // Autonomous Execution</div>
+                    <p class="authority-text">Moving a shot onto an idle standby node; quarantining a node that has breached its own thermal limit. Reversible, touches no other show, no producer-visible change to any deadline.</p>
+                </div>
+                <div class="authority-card">
+                    <div class="authority-badge tier-2-badge">Tier 2 // Producer Approval Required</div>
+                    <p class="authority-text">Pre-empting a node currently rendering another show's shot; anything touching more than one show; anything changing a delivery commitment. Holds execution with buffer loss arithmetic.</p>
+                </div>
+                <div class="authority-card">
+                    <div class="authority-badge tier-3-badge">Tier 3 // Prohibited</div>
+                    <p class="authority-text">Anything outside the farm. No external cloud capacity, no vendor escalation calls, no financial spend.</p>
+                </div>
             </div>
         </section>
 
@@ -1603,6 +1816,50 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             requestAnimationFrame(step);
         }
 
+        async function handleProducerDecision(approvalId, decision) {
+            try {
+                const btn = event ? event.target : null;
+                if (btn) btn.disabled = true;
+                await fetch(`/api/approvals/${approvalId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decision: decision })
+                });
+                await fetchState();
+            } catch (e) {
+                console.error("Error sending approval decision:", e);
+            }
+        }
+
+        function renderApprovalCards(pendingApprovals) {
+            const container = document.getElementById('approval-card-container');
+            if (!container) return;
+            const pending = (pendingApprovals || []).filter(a => a.status === 'PENDING');
+            if (pending.length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            container.innerHTML = pending.map(a => `
+                <div class="approval-banner">
+                    <div class="approval-header">
+                        <span class="approval-badge">TIER 2 APPROVAL REQUIRED // HOLD ACTIVE</span>
+                        <span class="approval-id mono">${a.id}</span>
+                    </div>
+                    <div class="approval-title">${a.action_title}</div>
+                    <div class="approval-plan">${a.plan_summary}</div>
+                    <div class="approval-arithmetic mono">
+                        <div><strong>Buffer Loss Rate:</strong> ${a.buffer_loss_rate}</div>
+                        <div><strong>Cost of Waiting:</strong> ${a.cost_of_waiting}</div>
+                        <div><strong>Deadline Impact:</strong> ${a.deadline_impact}</div>
+                    </div>
+                    <div class="approval-controls">
+                        <button class="btn-approve" onclick="handleProducerDecision('${a.id}', 'approve')">Approve Reallocation</button>
+                        <button class="btn-decline" onclick="handleProducerDecision('${a.id}', 'decline')">Decline & Escalate</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
         async function fetchState() {
             try {
                 const res = await fetch('/api/state');
@@ -1614,10 +1871,12 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 } else if (data.is_investigating) {
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)';
                 } else if (data.alert_pending) {
-                    statusText.innerHTML = '<span class="status-pip" style="color: var(--state-critical);"></span> GRAFANA ALERT PENDING';
+                    statusText.innerHTML = '<div style="display: flex; flex-direction: column;"><div style="display: flex; align-items: center; gap: 6px;"><span class="status-pip" style="color: var(--state-critical);"></span> Grafana alert pending</div><div style="font-size: 10px; color: var(--text-muted); font-weight: normal; text-transform: none; letter-spacing: normal; margin-top: 2px;">Grafana evaluates every minute</div></div>';
                 } else {
                     statusText.innerHTML = '<span class="status-pip"></span> AUTONOMOUS WATCH ACTIVE';
                 }
+
+                renderApprovalCards(data.pending_approvals);
 
                 renderSlate(data.shows, data.latest_mission, data.verification_progress);
 
@@ -2131,6 +2390,7 @@ DEMO_UI_HTML = """<!DOCTYPE html>
 
             <div class="btn-group">
                 <button class="btn-danger" onclick="injectScenario('THERMAL_THROTTLING')">Inject Scenario: Node-07 Thermal Throttling</button>
+                <button class="btn-danger" style="background: #4c1d95; color: #e9d5ff; border-color: #a855f7;" onclick="injectScenario('DOUBLE_FAULT')">Inject Scenario: Double Fault (Tier 2 Pre-emption)</button>
                 <button class="btn-secondary" onclick="injectScenario('MEMORY_LEAK_OOM')">Inject Scenario: Memory Leak (OOM)</button>
                 <button class="btn-secondary" onclick="injectScenario('BASELINE')">Restore Baseline Operations</button>
                 <button class="btn-primary" onclick="runManualMission()">Trigger Verified Mission</button>
@@ -2238,18 +2498,44 @@ async def get_producer_dashboard():
     incident_status = mission.get("incident_status", "") if mission else ""
     steps_len = len(steps)
 
+    pending_approvals = [a for a in PENDING_APPROVALS.values() if a.status == "PENDING"]
+    if pending_approvals:
+        approval_cards_html = "".join([
+            f'<div class="approval-banner">'
+            f'<div class="approval-header">'
+            f'<span class="approval-badge">TIER 2 APPROVAL REQUIRED // HOLD ACTIVE</span>'
+            f'<span class="approval-id mono">{a.id}</span>'
+            f'</div>'
+            f'<div class="approval-title">{a.action_title}</div>'
+            f'<div class="approval-plan">{a.plan_summary}</div>'
+            f'<div class="approval-arithmetic mono">'
+            f'<div><strong>Buffer Loss Rate:</strong> {a.buffer_loss_rate}</div>'
+            f'<div><strong>Cost of Waiting:</strong> {a.cost_of_waiting}</div>'
+            f'<div><strong>Deadline Impact:</strong> {a.deadline_impact}</div>'
+            f'</div>'
+            f'<div class="approval-controls">'
+            f'<button class="btn-approve" onclick="handleProducerDecision(\'{a.id}\', \'approve\')">Approve Reallocation</button>'
+            f'<button class="btn-decline" onclick="handleProducerDecision(\'{a.id}\', \'decline\')">Decline & Escalate</button>'
+            f'</div>'
+            f'</div>'
+            for a in pending_approvals
+        ])
+    else:
+        approval_cards_html = ""
+
     if worker.verification_progress and worker.verification_progress.get("active"):
         status_text_html = f'<span class="status-pip" style="color: var(--heat-warm);"></span> {worker.verification_progress.get("message")}'
     elif worker.is_investigating:
         status_text_html = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)'
     elif worker.alert_pending:
-        status_text_html = '<span class="status-pip" style="color: var(--state-critical);"></span> GRAFANA ALERT PENDING'
+        status_text_html = '<div style="display: flex; flex-direction: column;"><div style="display: flex; align-items: center; gap: 6px;"><span class="status-pip" style="color: var(--state-critical);"></span> Grafana alert pending</div><div style="font-size: 10px; color: var(--text-muted); font-weight: normal; text-transform: none; letter-spacing: normal; margin-top: 2px;">Grafana evaluates every minute</div></div>'
     else:
         status_text_html = '<span class="status-pip"></span> AUTONOMOUS WATCH ACTIVE'
 
     html = (
         PRODUCER_UI_TEMPLATE
         .replace("<!-- SSR_DELIVERY_BANNER -->", delivery_banner_html)
+        .replace("<!-- SSR_APPROVAL_CARD -->", approval_cards_html)
         .replace("<!-- SSR_SLATE -->", slate_html)
         .replace("<!-- SSR_STATUS_TEXT -->", status_text_html)
         .replace("<!-- SSR_BRIEFING_TIME -->", time_label)

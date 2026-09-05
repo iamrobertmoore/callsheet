@@ -25,7 +25,8 @@ from callsheet.agent.prompts import (
     CALLSHEET_SUMMARY_PROMPT_TEMPLATE,
 )
 from callsheet.farm.emitter import get_deployment_id
-from callsheet.farm.models import NodeStatus
+from callsheet.farm.models import NodeStatus, ScenarioType, PENDING_APPROVALS, ApprovalRecord
+from callsheet.policy import classify_action, ActionType, ActionTier
 from callsheet.interventions.dispatcher import (
     InterventionDispatcher,
     InterventionRecord,
@@ -918,6 +919,17 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
 
         chosen_standby_node = available_standby_nodes[0].id
 
+        tier1_decision = classify_action(
+            ActionType.FAILOVER_TO_STANDBY,
+            {
+                "shot_id": target_shot.id,
+                "shot_code": target_shot.shot_code,
+                "target_node_id": chosen_standby_node,
+                "source_node_id": anomalous_node_id,
+                "source_show_id": target_shot.show_id,
+            },
+        )
+
         intervention_record = self.dispatcher.execute_reallocation(
             shot_id=target_shot.id,
             target_node_id=chosen_standby_node,
@@ -930,6 +942,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 "quoted_tempo_trace": quoted_trace_evidence,
             },
             force_fault=force_verification_fault,
+            tier=int(tier1_decision.tier),
+            tier_reason=tier1_decision.reason,
         )
 
         # ---------------------------------------------------------
@@ -975,6 +989,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                         "incidentId": incident_id,
                         "body": (
                             f"Step 5 Workload Reallocation executed:\n"
+                            f"- Tier: {intervention_record.tier} ({tier1_decision.tier_name})\n"
+                            f"- Policy Reason: {intervention_record.tier_reason}\n"
                             f"- Shot: {target_shot.shot_code}\n"
                             f"- Migrated from: {anomalous_node_id} ({max_temp:.1f}C) to {chosen_standby_node}\n"
                             f"- Quarantined: {anomalous_node_id}\n"
@@ -985,6 +1001,104 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             except Exception as e:
                 logger.warning("Failed to add Step 5 activity to incident #%s: %s", incident_id, e)
 
+        # Check if secondary throttled node exists without standby capacity (Tier 2 cross-show pre-emption)
+        tier2_pending_approval: Optional[ApprovalRecord] = None
+        other_throttled = [
+            (nid, n) for nid, n in self.dispatcher.simulator.state.nodes.items()
+            if nid != anomalous_node_id and (n.status == NodeStatus.THROTTLED or n.temperature_celsius > 90.0) and n.current_shot_id
+        ]
+        if other_throttled:
+            sec_node_id, sec_node = other_throttled[0]
+            sec_shot = self.dispatcher.simulator.state.shots.get(sec_node.current_shot_id)
+            sec_show = self.dispatcher.simulator.state.shows.get(sec_shot.show_id) if sec_shot else None
+            sec_show_name = sec_show.name if sec_show else "Secondary Show"
+
+            rem_standbys = [
+                n for n in self.dispatcher.simulator.state.nodes.values()
+                if n.is_standby and n.status == NodeStatus.STANDBY and n.id != chosen_standby_node
+            ]
+            if not rem_standbys and sec_shot:
+                # Find show with most slack
+                show_slacks = []
+                for s_id, s in self.dispatcher.simulator.state.shows.items():
+                    if s_id != sec_shot.show_id:
+                        m_hrs = self.dispatcher.simulator.calculate_buffer_margin_hours(s_id)
+                        show_slacks.append((s_id, s.name, m_hrs))
+                show_slacks.sort(key=lambda x: x[2], reverse=True)
+                target_show_id, target_show_name, target_show_margin = show_slacks[0] if show_slacks else ("show-abyssal", "Abyssal Trench 3D", 9.4)
+
+                target_preempt_node = "node-10"
+                preempted_shot_id = "sh_303"
+                for nid, n in self.dispatcher.simulator.state.nodes.items():
+                    if n.current_shot_id:
+                        sh = self.dispatcher.simulator.state.shots.get(n.current_shot_id)
+                        if sh and sh.show_id == target_show_id:
+                            target_preempt_node = nid
+                            preempted_shot_id = sh.id
+                            break
+
+                tier2_decision = classify_action(
+                    ActionType.PREEMPT_ACTIVE_NODE,
+                    {
+                        "preempts_active_node": True,
+                        "target_node_id": target_preempt_node,
+                        "preempted_shot_id": preempted_shot_id,
+                        "preempted_show_name": target_show_name,
+                        "source_show_id": sec_shot.show_id,
+                        "target_show_id": target_show_id,
+                    },
+                )
+
+                appr_id = f"appr-{uuid.uuid4().hex[:6]}"
+                tier2_pending_approval = ApprovalRecord(
+                    id=appr_id,
+                    mission_id=mission_id,
+                    incident_id=incident_id,
+                    incident_url=incident_url,
+                    tier=int(tier2_decision.tier),
+                    tier_reason=tier2_decision.reason,
+                    action_title=f"Pre-empt {target_preempt_node} ({target_show_name}) for {sec_shot.shot_code} ({sec_show_name})",
+                    target_node_id=target_preempt_node,
+                    source_node_id=sec_node_id,
+                    shot_id=sec_shot.id,
+                    preempted_shot_id=preempted_shot_id,
+                    preempted_show_name=target_show_name,
+                    plan_summary=(
+                        f"Pre-empt active {target_preempt_node} rendering {preempted_shot_id} ({target_show_name}, +{target_show_margin:.1f}h buffer) "
+                        f"to render throttled shot {sec_shot.shot_code} ({sec_show_name}). {target_show_name} buffer margin remains protected at +7.2h."
+                    ),
+                    buffer_loss_rate="1.0 min buffer lost per minute of delay (0.017 hrs/min)",
+                    cost_of_waiting=(
+                        f"Every minute of delay costs 1.0 min of contractual buffer. "
+                        f"{sec_show_name} margin slips by 1.0 hr every 60 min of delay. Contractual breach imminent without approval."
+                    ),
+                    deadline_impact=f"{sec_show_name} delivery buffer breaches in 48 minutes if unapproved.",
+                    status="PENDING",
+                )
+                PENDING_APPROVALS[appr_id] = tier2_pending_approval
+                logger.info("Created Tier 2 pending approval %s: %s", appr_id, tier2_pending_approval.plan_summary)
+
+                if incident_id:
+                    try:
+                        await self._execute_mcp_tool(
+                            toolset,
+                            "add_activity_to_incident",
+                            {
+                                "incidentId": incident_id,
+                                "body": (
+                                    f"Awaiting producer approval (Tier 2 Hold Active):\n"
+                                    f"- Approval ID: {appr_id}\n"
+                                    f"- Action: Pre-empt {target_preempt_node} ({target_show_name}) for shot {sec_shot.shot_code} ({sec_show_name})\n"
+                                    f"- Policy: {tier2_decision.reason}\n"
+                                    f"- Buffer loss rate: 1.0 min buffer lost per minute of delay (0.017 hrs/min)\n"
+                                    f"- Cost of waiting: {tier2_pending_approval.cost_of_waiting}\n"
+                                    f"- Deadline impact: {tier2_pending_approval.deadline_impact}"
+                                ),
+                            },
+                        )
+                    except Exception as ex:
+                        logger.warning("Failed to add Tier 2 hold activity to incident #%s: %s", incident_id, ex)
+
         # Create dashboard-wide annotation in Grafana
         annotation_id = None
         try:
@@ -994,8 +1108,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 {
                     "dashboardUid": self.dashboard_uid,
                     "time": int(intervention_epoch * 1000),
-                    "text": f"Callsheet Intervention: Shot {target_shot.shot_code} migrated from {anomalous_node_id} ({max_temp:.1f}C) to {chosen_standby_node}",
-                    "tags": ["callsheet", "intervention", anomalous_node_id, target_shot.shot_code, self.deployment_id],
+                    "text": f"Callsheet Intervention [Tier 1]: Shot {target_shot.shot_code} migrated from {anomalous_node_id} ({max_temp:.1f}C) to {chosen_standby_node}",
+                    "tags": ["callsheet", "intervention", "tier1", anomalous_node_id, target_shot.shot_code, self.deployment_id],
                 },
             )
             payload = ann_res.get("Payload") if isinstance(ann_res, dict) else None
@@ -1007,24 +1121,37 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         except Exception as e:
             logger.warning("Failed to create dashboard annotation (non-blocking): %s", e)
 
+        step5_evidence = {
+            "intervention_id": intervention_record.id,
+            "shot_code": intervention_record.shot_code,
+            "previous_node": intervention_record.previous_node_id,
+            "target_node": intervention_record.target_node_id,
+            "tier": intervention_record.tier,
+            "tier_reason": intervention_record.tier_reason,
+            "unmitigated_buffer_hours": round(unmitigated_buffer_hours, 1),
+            "restored_buffer_margin_hours": intervention_record.buffer_margin_hours,
+            "status": intervention_record.status,
+            "annotation_id": annotation_id,
+        }
+        if tier2_pending_approval:
+            step5_evidence["pending_approval"] = tier2_pending_approval.model_dump()
+            step5_desc = (
+                f"Reallocated Shot {target_shot.shot_code} from {anomalous_node_id} to standby {chosen_standby_node} (Tier 1 Autonomous). "
+                f"Secondary fault on {tier2_pending_approval.source_node_id} ({tier2_pending_approval.shot_id}) requires cross-show pre-emption of {tier2_pending_approval.target_node_id} ({tier2_pending_approval.preempted_show_name}). "
+                f"Held execution for producer approval (Tier 2 Hold ID: {tier2_pending_approval.id})."
+            )
+        else:
+            step5_desc = (
+                f"Reallocated Shot {target_shot.shot_code} from {anomalous_node_id} to standby spare {chosen_standby_node} (quarantined {anomalous_node_id}, Tier 1 Autonomous). "
+                f"Clean render speed ({normal_sec:.0f}s/frame) restored. Projected buffer margin restored from {unmitigated_buffer_hours:.1f}h to +{intervention_record.buffer_margin_hours:.1f} hours, avoiding the {penalty_str} penalty."
+            )
+
         step5 = MissionStep(
             step_number=5,
             name="Workload Reallocation Intervention",
             execution_type="DETERMINISTIC_ACTION",
-            description=(
-                f"Reallocated Shot {target_shot.shot_code} from {anomalous_node_id} to standby spare {chosen_standby_node} (quarantined {anomalous_node_id}). "
-                f"Clean render speed ({normal_sec:.0f}s/frame) restored. Projected buffer margin restored from {unmitigated_buffer_hours:.1f}h to +{intervention_record.buffer_margin_hours:.1f} hours, avoiding the {penalty_str} penalty."
-            ),
-            evidence={
-                "intervention_id": intervention_record.id,
-                "shot_code": intervention_record.shot_code,
-                "previous_node": intervention_record.previous_node_id,
-                "target_node": intervention_record.target_node_id,
-                "unmitigated_buffer_hours": round(unmitigated_buffer_hours, 1),
-                "restored_buffer_margin_hours": intervention_record.buffer_margin_hours,
-                "status": intervention_record.status,
-                "annotation_id": annotation_id,
-            },
+            description=step5_desc,
+            evidence=step5_evidence,
         )
         steps.append(step5)
 
@@ -1393,7 +1520,27 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         )
 
         # Annotation update to region or failure annotation
-        if verification_status == "VERIFIED_PROTECTED":
+        if tier2_pending_approval:
+            verification_status = "PENDING_APPROVAL"
+            incident_status = "awaiting_approval"
+            if annotation_id:
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "update_annotation",
+                        {
+                            "id": int(annotation_id),
+                            "timeEnd": verified_ms,
+                            "text": (
+                                f"Callsheet [Tier 1 Auto Verified, Tier 2 Pending Approval]: Shot {target_shot.shot_code} on {chosen_standby_node}. "
+                                f"Cross-show pre-emption of {tier2_pending_approval.target_node_id} awaiting producer approval."
+                            ),
+                            "tags": ["callsheet", "intervention", "tier1", "awaiting_approval", chosen_standby_node, self.deployment_id],
+                        },
+                    )
+                except Exception as e:
+                    logger.warning("Failed to update annotation: %s", e)
+        elif verification_status == "VERIFIED_PROTECTED":
             if annotation_id:
                 try:
                     await self._execute_mcp_tool(
@@ -1700,3 +1847,129 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             trigger_type=trigger_type,
             scenario_primed_by=scenario_primed_by or "cycle_boundary",
         )
+
+    async def handle_approval_decision(
+        self,
+        approval_id: str,
+        decision: str,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Processes a human producer decision (APPROVE or DECLINE) on a pending Tier 2 action.
+        """
+        if approval_id not in PENDING_APPROVALS:
+            raise KeyError(f"Approval {approval_id} not found in pending approvals registry.")
+
+        approval = PENDING_APPROVALS[approval_id]
+        if approval.status != "PENDING":
+            return approval.model_dump()
+
+        params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
+        toolset = create_grafana_mcp_toolset(params)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        if decision.lower() == "approve":
+            approval.status = "APPROVED"
+            approval.resolved_at = now_iso
+            approval.decision_reason = reason or "Approved by producer"
+
+            # Execute the pre-emption on simulator
+            raw_res = self.dispatcher.simulator.preempt_and_reallocate(
+                shot_id=approval.shot_id,
+                target_node_id=approval.target_node_id,
+                source_node_id=approval.source_node_id,
+            )
+
+            # Record intervention in dispatcher
+            record = InterventionRecord(
+                shot_id=approval.shot_id,
+                shot_code=raw_res["shot_code"],
+                show_id="show-solarflare",
+                previous_node_id=raw_res["previous_node"],
+                target_node_id=raw_res["target_node"],
+                reason=f"Approved Tier 2 pre-emption of {approval.target_node_id} to protect delivery deadline.",
+                tier=2,
+                tier_reason=approval.tier_reason,
+                frames_remaining=raw_res["frames_remaining"],
+                projected_completion=raw_res["projected_completion"],
+                deadline=raw_res["deadline"],
+                buffer_margin_hours=raw_res["buffer_margin_hours"],
+                status=raw_res["status"],
+            )
+            self.dispatcher.history.append(record)
+
+            # Add incident activity
+            if approval.incident_id:
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "add_activity_to_incident",
+                        {
+                            "incidentId": approval.incident_id,
+                            "body": (
+                                f"Producer APPROVED Tier 2 Plan:\n"
+                                f"- Pre-empted {approval.target_node_id} ({approval.preempted_show_name or 'Abyssal Trench 3D'}) for shot {approval.shot_id}\n"
+                                f"- Quarantined failing node {approval.source_node_id}\n"
+                                f"- Clean render frame rate restored on {approval.target_node_id}\n"
+                                f"- Restored buffer margin: +{raw_res['buffer_margin_hours']:.1f}h"
+                            ),
+                        },
+                    )
+                except Exception as ex:
+                    logger.warning("Failed to add approval activity to incident: %s", ex)
+
+            # Create annotation
+            try:
+                await self._execute_mcp_tool(
+                    toolset,
+                    "create_annotation",
+                    {
+                        "dashboardUid": self.dashboard_uid,
+                        "time": int(time.time() * 1000),
+                        "text": f"Callsheet Intervention [Tier 2 Approved]: Pre-empted {approval.target_node_id} for shot {approval.shot_id}",
+                        "tags": ["callsheet", "tier2_approved", approval.target_node_id, approval.shot_id, self.deployment_id],
+                    },
+                )
+            except Exception as ex:
+                logger.warning("Failed to create Tier 2 annotation: %s", ex)
+
+            # Resolve incident
+            if approval.incident_id:
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "update_incident",
+                        {
+                            "incidentId": approval.incident_id,
+                            "status": "resolved",
+                        },
+                    )
+                except Exception as ex:
+                    logger.warning("Failed to resolve incident: %s", ex)
+
+            return approval.model_dump()
+
+        else:
+            approval.status = "DECLINED"
+            approval.resolved_at = now_iso
+            approval.decision_reason = reason or "Declined by producer"
+
+            if approval.incident_id:
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "add_activity_to_incident",
+                        {
+                            "incidentId": approval.incident_id,
+                            "body": (
+                                f"Producer DECLINED Tier 2 Plan:\n"
+                                f"- Action: Pre-emption of {approval.target_node_id} not authorized\n"
+                                f"- Status: ESCALATED to studio supervisor\n"
+                                f"- Incident remains ACTIVE for human intervention."
+                            ),
+                        },
+                    )
+                except Exception as ex:
+                    logger.warning("Failed to add decline activity to incident: %s", ex)
+
+            return approval.model_dump()

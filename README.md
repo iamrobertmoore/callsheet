@@ -20,27 +20,36 @@ Callsheet monitors render operations through Grafana Cloud over the Model Contex
           │ (OTel: Prometheus Metrics, Loki Logs, Tempo Traces via OTLP)
           ▼
    [ Grafana Cloud ]
-          │
-          │ (Streamable HTTP / Service Account Token)
+          │ (Alert Rule cfxbt56wwbocge firing on 60s evaluation floor)
           ▼
    [ mcp-grafana Server ]
-          │
-          │ (Model Context Protocol)
+          │ (Model Context Protocol / Streamable HTTP)
           ▼
- [ Callsheet Operations Agent (Google ADK + Vertex AI Gemini 3.6 Flash) ]
+ [ Callsheet Operations Agent (Google ADK + Vertex AI Gemini) ]
           │
-          ├─► Step 1: Anomaly Detection (Prometheus)                 [DETERMINISTIC TELEMETRY]
-          ├─► Step 2: Correlation (Loki Logs & Tempo Traces)         [DETERMINISTIC TELEMETRY]
-          ├─► Step 3: Root Cause Isolation (Gemini 3.6 Flash)        [GENERATIVE AI]
-          ├─► Step 4: Production Impact Mapping                      [DETERMINISTIC ARITHMETIC]
-          ├─► Step 5: Autonomous Workload Reallocation               [DETERMINISTIC ACTION]
-          ├─► Step 6: Post-Intervention Verification (Grafana Cloud) [DETERMINISTIC VERIFICATION]
-          └─► Step 7: Producer Callsheet Briefing (Gemini 3.6 Flash) [GENERATIVE AI]
+          ├─► Step 0: Alert Trigger (Grafana Cloud Alerting)        [DETERMINISTIC ALERT]
+          ├─► Step 1: Anomaly Detection (Prometheus Metrics)        [DETERMINISTIC TELEMETRY]
+          ├─► Step 2: Correlation (Loki Logs & Tempo Traces)        [DETERMINISTIC TELEMETRY]
+          ├─► Step 3: Root Cause Isolation (Gemini Synthesis)       [GENERATIVE AI]
+          ├─► Step 4: Production Impact Mapping & SLA Arithmetic    [DETERMINISTIC ARITHMETIC]
+          ├─► Step 5: Workload Reallocation (Blast Radius Policy)   [DETERMINISTIC ACTION]
+          ├─► Step 6: Post-Intervention Verification (Grafana Cloud)[DETERMINISTIC VERIFICATION]
+          └─► Step 7: Producer Callsheet Briefing & Incident Resolve[GENERATIVE + MCP RESOLUTION]
 ```
+
+Grafana Cloud evaluates the Callsheet rule group once a minute on this stack regardless of the configured 10s interval, setting the observed evaluation scheduler floor to 60s.
 
 ## Architecture and Native Google ADK Integration
 
 Callsheet is built natively on the Google Agent Development Kit (ADK). It uses `google.adk.tools.mcp_tool.McpToolset` with `StreamableHTTPConnectionParams` to manage Model Context Protocol tool lifecycle, streaming HTTP connections, and dynamic schema binding directly to the Grafana Cloud MCP server.
+
+## Blast Radius and Authority Policy
+
+Callsheet enforces strict operational authority boundaries classified into three tiers:
+
+- **Tier 1 (Autonomous Execution)**: Moving a shot onto an idle standby node; quarantining a node that has breached its own thermal limit. Reversible, touches no other show, and introduces no producer-visible deadline change.
+- **Tier 2 (Producer Approval Required)**: Pre-empting a node currently rendering another show's shot; anything touching more than one show; anything changing a contractual delivery commitment. Holds execution and presents real-time buffer loss arithmetic for human sign-off via `POST /api/approvals/{id}`.
+- **Tier 3 (Prohibited)**: Actions outside the farm boundary. No external cloud capacity, no vendor escalation calls, and no financial spend.
 
 ## Deterministic Action vs. Generative Explanation
 
@@ -106,6 +115,25 @@ pytest tests/test_agent_mission.py::test_mission_fails_when_grafana_unreachable 
 ./scripts/start_server.sh
 ```
 Open `http://localhost:8080` in your browser to view the active Call Sheet dashboard, or visit `/demo` to inject scenarios on demand.
+
+## Telemetry Verification and Health Endpoint
+
+The `/api/health` endpoint proves live operational state in a single request with zero secrets:
+- `agent_runtime`: `"live"`
+- `replay_mode`: `false`
+- `mcp_server`: `"grafana/mcp-grafana v1.2.0, self-hosted sidecar"`
+- `mcp_transport`: `"streamable-http"`
+- `mcp_reachable`: Evaluated live at request time via `list_datasources` tool execution.
+- `grafana_stack`: `"bigforest2172"`
+- `alert_rule_uid`: `"cfxbt56wwbocge"`
+- `alert_rule_state`: Current ruler state (`"Firing"`, `"Normal"`)
+- `alert_rule_interval_configured`: `"10s"`
+- `alert_rule_interval_observed`: `"60s"` (Grafana Cloud scheduler floor)
+- `model`: `"gemini-3.8-flash"`
+- `model_location`: `"global"`
+- `pending_approvals`: Current list of Tier 2 actions held for producer review.
+
+See [LIMITATIONS.md](LIMITATIONS.md) for full operational constraints, simulator architecture details, and Gemini boundaries.
 
 ## Technologies Used
 

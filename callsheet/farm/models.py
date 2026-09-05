@@ -30,6 +30,34 @@ class ScenarioType(str, Enum):
     THERMAL_THROTTLING = "THERMAL_THROTTLING"
     MEMORY_LEAK_OOM = "MEMORY_LEAK_OOM"
     STORAGE_BOTTLENECK = "STORAGE_BOTTLENECK"
+    DOUBLE_FAULT = "DOUBLE_FAULT"
+
+
+class ApprovalRecord(BaseModel):
+    id: str
+    mission_id: Optional[str] = None
+    incident_id: Optional[str] = None
+    incident_url: Optional[str] = None
+    tier: int = 2
+    tier_reason: str
+    action_title: str
+    target_node_id: str
+    source_node_id: str
+    shot_id: str
+    preempted_shot_id: Optional[str] = None
+    preempted_show_name: Optional[str] = None
+    plan_summary: str
+    buffer_loss_rate: str
+    cost_of_waiting: str
+    deadline_impact: str
+    status: str = "PENDING"  # PENDING, APPROVED, DECLINED
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    resolved_at: Optional[str] = None
+    decision_reason: Optional[str] = None
+
+
+# Central in-memory registry of pending human producer approvals
+PENDING_APPROVALS: dict[str, ApprovalRecord] = {}
 
 
 class Show(BaseModel):

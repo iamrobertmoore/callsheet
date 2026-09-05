@@ -216,8 +216,130 @@ class RenderFarmSimulator:
             if shot:
                 shot.status = ShotStatus.AT_RISK
 
+        elif scenario == ScenarioType.DOUBLE_FAULT:
+            # Degrade node-07 (rendering Shot 118 for Aethelgard critical delivery)
+            node07 = self.state.nodes["node-07"]
+            node07.status = NodeStatus.THROTTLED
+            node07.temperature_celsius = round(target_temp, 1) if target_temp is not None else 96.2
+            node07.cpu_utilization = 99.0
+            node07.current_shot_id = "sh_118"
+            node07.current_frame = 1061
+
+            # Degrade node-03 (rendering Shot 204 for Solarflare show)
+            node03 = self.state.nodes["node-03"]
+            node03.status = NodeStatus.THROTTLED
+            node03.temperature_celsius = 95.5
+            node03.cpu_utilization = 98.5
+            node03.current_shot_id = "sh_204"
+
+            # Exactly 1 standby available: node-11 is STANDBY, node-12 is in MAINTENANCE (OFFLINE)
+            node11 = self.state.nodes["node-11"]
+            node11.is_standby = True
+            node11.status = NodeStatus.STANDBY
+            node11.temperature_celsius = 42.0
+            node11.current_shot_id = None
+            node11.current_frame = None
+
+            node12 = self.state.nodes["node-12"]
+            node12.is_standby = False
+            node12.status = NodeStatus.OFFLINE
+            node12.name = "Farm-Worker-12 (Maintenance)"
+            node12.current_shot_id = None
+            node12.current_frame = None
+
+            # Re-queue any shots on standby nodes
+            for s in self.state.shots.values():
+                if s.allocated_node_id in ["node-11", "node-12"]:
+                    s.allocated_node_id = None
+                    s.status = ShotStatus.QUEUED
+
+            # Prime shot 118 on node-07
+            shot118 = self.state.shots.get("sh_118")
+            if shot118:
+                shot118.allocated_node_id = "node-07"
+                shot118.total_frames = 300
+                shot118.completed_frames = 60
+                shot118.render_progress_seconds = 0.0
+                shot118.current_seconds_per_frame = 120.0
+                shot118.status = ShotStatus.AT_RISK
+                shot118.delivered_at = None
+                shot118.delivery_margin_hours_achieved = None
+
+            # Prime shot 204 on node-03
+            shot204 = self.state.shots.get("sh_204")
+            if shot204:
+                shot204.allocated_node_id = "node-03"
+                shot204.current_seconds_per_frame = 110.0
+                shot204.status = ShotStatus.AT_RISK
+
         elif scenario == ScenarioType.BASELINE:
             self.reset_cycle()
+
+    def preempt_and_reallocate(
+        self,
+        shot_id: str,
+        target_node_id: str,
+        source_node_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Intervention action (Tier 2): pre-empts an active node currently rendering another show's shot
+        to save a critical shot whose standby capacity is exhausted.
+        """
+        if shot_id not in self.state.shots:
+            raise ValueError(f"Shot {shot_id} not found.")
+        if target_node_id not in self.state.nodes:
+            raise ValueError(f"Target node {target_node_id} not found.")
+
+        target_node = self.state.nodes[target_node_id]
+        shot = self.state.shots[shot_id]
+        prev_node_id = source_node_id or shot.allocated_node_id
+
+        # Quarantine degraded source node
+        if prev_node_id and prev_node_id in self.state.nodes:
+            prev_node = self.state.nodes[prev_node_id]
+            prev_node.status = NodeStatus.QUARANTINED
+            prev_node.current_shot_id = None
+            prev_node.current_frame = None
+
+        # Pre-empt active shot on target node if present
+        preempted_shot_id = target_node.current_shot_id
+        if preempted_shot_id and preempted_shot_id in self.state.shots:
+            preempted_shot = self.state.shots[preempted_shot_id]
+            preempted_shot.status = ShotStatus.QUEUED
+            preempted_shot.allocated_node_id = None
+
+        # Reallocate shot to target node
+        shot.allocated_node_id = target_node_id
+        shot.status = ShotStatus.RENDERING
+        shot.render_progress_seconds = 0.0
+        shot.current_seconds_per_frame = shot.estimated_seconds_per_frame
+
+        target_node.is_standby = False
+        target_node.status = NodeStatus.HEALTHY
+        target_node.current_shot_id = shot_id
+        target_node.current_frame = 1000 + shot.completed_frames + 1
+        target_node.temperature_celsius = round(random.uniform(61.0, 65.0), 1)
+
+        sim_now = self.state.last_updated or datetime.now(timezone.utc)
+        est_sec_remaining = shot.estimated_time_remaining_seconds()
+        est_completion_time = sim_now + timedelta(seconds=est_sec_remaining)
+        show = self.state.shows.get(shot.show_id)
+        deadline = show.delivery_deadline if show else sim_now
+        margin_hours = (deadline - est_completion_time).total_seconds() / 3600.0
+
+        return {
+            "shot_id": shot_id,
+            "shot_code": shot.shot_code,
+            "previous_node": prev_node_id,
+            "target_node": target_node_id,
+            "preempted_shot_id": preempted_shot_id,
+            "frames_remaining": shot.frames_remaining,
+            "estimated_seconds_per_frame": shot.current_seconds_per_frame,
+            "projected_completion": est_completion_time.isoformat(),
+            "deadline": deadline.isoformat(),
+            "buffer_margin_hours": round(margin_hours, 1),
+            "status": "PROTECTED" if margin_hours > 0 else "SLIPPING",
+        }
 
     def reallocate_shot(
         self,

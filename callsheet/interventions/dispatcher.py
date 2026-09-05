@@ -8,6 +8,7 @@ import uuid
 from pydantic import BaseModel, Field
 
 from callsheet.farm.simulator import RenderFarmSimulator
+from callsheet.policy import classify_action, ActionType
 
 
 class InterventionRecord(BaseModel):
@@ -19,6 +20,8 @@ class InterventionRecord(BaseModel):
     previous_node_id: str
     target_node_id: str
     reason: str
+    tier: int = 1
+    tier_reason: str = "Moving shot onto idle standby is reversible and touches no other show."
     frames_remaining: int
     projected_completion: str
     deadline: str
@@ -43,6 +46,8 @@ class InterventionDispatcher:
         reason: str,
         telemetry_evidence: Optional[dict] = None,
         force_fault: bool = False,
+        tier: Optional[int] = None,
+        tier_reason: Optional[str] = None,
     ) -> InterventionRecord:
         """
         Executes a shot reallocation from a failing node to a standby node.
@@ -62,6 +67,24 @@ class InterventionDispatcher:
         )
         shot = self.simulator.state.shots[shot_id]
 
+        # Policy classification if tier not explicitly provided
+        if tier is None or not tier_reason:
+            decision = classify_action(
+                ActionType.FAILOVER_TO_STANDBY,
+                {
+                    "shot_id": shot_id,
+                    "shot_code": raw_result["shot_code"],
+                    "target_node_id": target_node_id,
+                    "source_node_id": raw_result["previous_node"],
+                    "source_show_id": shot.show_id,
+                },
+            )
+            act_tier = int(decision.tier)
+            act_reason = decision.reason
+        else:
+            act_tier = tier
+            act_reason = tier_reason
+
         record = InterventionRecord(
             shot_id=shot_id,
             shot_code=raw_result["shot_code"],
@@ -69,6 +92,8 @@ class InterventionDispatcher:
             previous_node_id=raw_result["previous_node"],
             target_node_id=raw_result["target_node"],
             reason=reason,
+            tier=act_tier,
+            tier_reason=act_reason,
             frames_remaining=raw_result["frames_remaining"],
             projected_completion=raw_result["projected_completion"],
             deadline=raw_result["deadline"],
