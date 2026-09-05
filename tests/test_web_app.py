@@ -92,3 +92,34 @@ async def test_mission_panel_png_endpoint(monkeypatch):
 
     MISSION_PANEL_IMAGES.pop(test_id, None)
     MISSION_PANEL_IMAGES.pop("unknown_id", None)
+
+
+@pytest.mark.asyncio
+async def test_alert_rule_health_fail_closed(monkeypatch):
+    """
+    Section 3d: Verify that if the Grafana alert rule cannot be created or read,
+    /api/health reports status: 'degraded' with alert_rule_status: 'error'.
+    When healthy, it reports status: 'healthy' with alert_rule_status: 'ok'.
+    """
+    from callsheet.web.app import worker
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Error state (fails closed, degraded)
+        monkeypatch.setattr(worker, "alert_rule_status", "error")
+        monkeypatch.setattr(worker, "alert_rule_error", "connection refused to mcp")
+        res_deg = await client.get("/api/health")
+        assert res_deg.status_code == 200
+        data_deg = res_deg.json()
+        assert data_deg["status"] == "degraded"
+        assert data_deg["alert_rule_status"] == "error"
+        assert data_deg["alert_rule_error"] == "connection refused to mcp"
+
+        # 2. Healthy state
+        monkeypatch.setattr(worker, "alert_rule_status", "ok")
+        monkeypatch.setattr(worker, "alert_rule_error", None)
+        res_ok = await client.get("/api/health")
+        assert res_ok.status_code == 200
+        data_ok = res_ok.json()
+        assert data_ok["status"] == "healthy"
+        assert data_ok["alert_rule_status"] == "ok"
+

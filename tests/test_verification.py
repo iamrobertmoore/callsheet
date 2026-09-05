@@ -91,7 +91,8 @@ async def test_verification_fails_closed_when_loki_returns_nothing():
 
         assert result.verification_status == "VERIFICATION_INCONCLUSIVE"
         assert result.intervention_record.status == "PENDING_VERIFICATION"
-        step6_evidence = result.steps[5].evidence
+        step6 = next(s for s in result.steps if s.step_number == 6)
+        step6_evidence = step6.evidence
         assert step6_evidence["verification_passed"] is False
         assert step6_evidence["verified_frame_duration_seconds"] is None
         assert step6_evidence["target_temperature_celsius"] is None
@@ -211,11 +212,12 @@ async def test_verification_passes_only_when_duration_and_temp_meet_criteria():
         )
         assert res_pass.verification_status == "VERIFIED_PROTECTED"
         assert res_pass.intervention_record.status == "PROTECTED"
-        assert res_pass.steps[5].evidence["verification_passed"] is True
-        assert res_pass.steps[5].evidence["verified_frame_duration_seconds"] == 20.0
-        assert res_pass.steps[5].evidence["target_temperature_celsius"] == 62.4
-        assert res_pass.steps[5].evidence["prometheus_actual_sample_timestamp"] == future_epoch
-        assert res_pass.steps[5].evidence["deployment_id"] == runner.deployment_id
+        step6_pass = next(s for s in res_pass.steps if s.step_number == 6)
+        assert step6_pass.evidence["verification_passed"] is True
+        assert step6_pass.evidence["verified_frame_duration_seconds"] == 20.0
+        assert step6_pass.evidence["target_temperature_celsius"] == 62.4
+        assert step6_pass.evidence["prometheus_actual_sample_timestamp"] == future_epoch
+        assert step6_pass.evidence["deployment_id"] == runner.deployment_id
 
     # Case B: Degraded duration (40.0s > 25.0s threshold) triggers escalation
     sim_b = RenderFarmSimulator()
@@ -263,8 +265,9 @@ async def test_verification_passes_only_when_duration_and_temp_meet_criteria():
         )
         assert res_fail.verification_status == "ESCALATED"
         assert res_fail.intervention_record.status == "ESCALATED"
-        assert res_fail.steps[5].evidence["verification_passed"] is False
-        assert res_fail.steps[5].evidence["verified_frame_duration_seconds"] == 40.0
+        step6_fail = next(s for s in res_fail.steps if s.step_number == 6)
+        assert step6_fail.evidence["verification_passed"] is False
+        assert step6_fail.evidence["verified_frame_duration_seconds"] == 40.0
 
 
 @pytest.mark.asyncio
@@ -345,7 +348,8 @@ async def test_tempo_grace_period_and_prometheus_sample_timestamp_gating():
         )
 
         assert res.verification_status == "VERIFIED_PROTECTED"
-        step6_evidence = res.steps[5].evidence
+        step6 = next(s for s in res.steps if s.step_number == 6)
+        step6_evidence = step6.evidence
         assert step6_evidence["verification_passed"] is True
         assert step6_evidence["witnesses_accepted"] == ["Loki", "Prometheus", "Tempo"]
         assert "trace-witness-3" in step6_evidence["tempo_trace_id"]

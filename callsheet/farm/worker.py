@@ -8,11 +8,13 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from callsheet.farm.emitter import FarmTelemetryEmitter
+from callsheet.agent.alerting import ensure_alert_rule, get_alert_rule, PRODUCTION_ALERT_RULE_UID
+from callsheet.farm.emitter import FarmTelemetryEmitter, get_deployment_id
 from callsheet.farm.models import NodeStatus, ScenarioType
 from callsheet.farm.simulator import RenderFarmSimulator
+from callsheet.mcp.client import create_grafana_mcp_toolset, get_grafana_mcp_connection_params
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +95,14 @@ class FarmWorker:
         mission_runner: Optional[Any] = None,
         tick_interval_seconds: float = 5.0,
         cycle_interval_seconds: float = 6.0 * 3600.0,
+        mcp_server_url: Optional[str] = None,
     ):
         self.simulator = simulator or RenderFarmSimulator()
         self.emitter = emitter or FarmTelemetryEmitter(self.simulator)
         self.mission_runner = mission_runner
         self.tick_interval_seconds = tick_interval_seconds
         self.cycle_interval_seconds = cycle_interval_seconds
+        self.mcp_server_url = mcp_server_url
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._mission_task: Optional[asyncio.Task] = None
@@ -108,9 +112,20 @@ class FarmWorker:
         self._last_cycle_epoch: Optional[int] = None
         self.instance_started_at: str = datetime.now(timezone.utc).isoformat()
         self.missions_this_instance: int = 0
-        self._pending_trigger_type: str = "instance_start"
         self.tick_cadence_history: List[Dict[str, Any]] = []
         self._last_tick_start: Optional[float] = None
+
+        # Section 3: Alert-Driven Autonomous Loop and telemetry metadata
+        self.deployment_id: str = get_deployment_id()
+        self.alert_rule_uid: Optional[str] = (
+            PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else None
+        )
+        self.alert_rule_status: str = "initializing"
+        self.alert_rule_error: Optional[str] = None
+        self.scenario_primed_by: str = "instance_start"
+        self.fault_injected_at: Optional[float] = time.time()
+        self.alert_firing_observed_at: Optional[float] = None
+        self.mission_started_at: Optional[float] = None
 
     @property
     def verification_progress(self) -> Optional[Dict[str, Any]]:
@@ -136,13 +151,38 @@ class FarmWorker:
             "recent_ticks": self.tick_cadence_history[-5:],
         }
 
+    async def _init_alert_rule(self) -> None:
+        """Initializes or binds the Grafana alert rule for autonomous watchdog monitoring."""
+        try:
+            params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
+            toolset = create_grafana_mcp_toolset(params)
+            rule = await ensure_alert_rule(toolset, self.deployment_id)
+            if rule and "uid" in rule:
+                self.alert_rule_uid = rule["uid"]
+                self.alert_rule_status = "ok"
+                self.alert_rule_error = None
+                logger.info("Watchdog bound to Grafana alert rule %s (%s)", self.alert_rule_uid, self.deployment_id)
+            else:
+                self.alert_rule_status = "error"
+                self.alert_rule_error = "ensure_alert_rule returned empty rule"
+        except Exception as ex:
+            self.alert_rule_status = "error"
+            self.alert_rule_error = str(ex)
+            logger.warning("Failed to initialize Grafana alert rule at startup: %s (failing closed)", ex)
+
     async def start(self) -> None:
         """Starts the continuous emission and autonomous watchdog loop."""
         if self._running:
             return
         self._running = True
+        await self._init_alert_rule()
         self._task = asyncio.create_task(self._run_loop())
-        logger.info("Farm continuous worker started (interval: %.1fs, cycle: %.1fh)", self.tick_interval_seconds, self.cycle_interval_seconds / 3600.0)
+        logger.info(
+            "Farm continuous worker started (interval: %.1fs, cycle: %.1fh, alert_rule: %s)",
+            self.tick_interval_seconds,
+            self.cycle_interval_seconds / 3600.0,
+            self.alert_rule_uid,
+        )
 
     async def stop(self) -> None:
         """Stops the continuous emission loop."""
@@ -183,7 +223,10 @@ class FarmWorker:
                     logger.info("Cycle epoch change (epoch: %d, trigger: %s). Performing full farm reset and priming scenario...", current_epoch, trigger)
                     self._last_cycle_epoch = current_epoch
                     self._last_investigated_node = None
-                    self._pending_trigger_type = trigger
+                    self.scenario_primed_by = trigger
+                    self.fault_injected_at = time.time()
+                    self.alert_firing_observed_at = None
+                    self.mission_started_at = None
                     self.simulator.reset_cycle()
                     self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
 
@@ -198,7 +241,7 @@ class FarmWorker:
                 if events:
                     self.emitter.process_events(events)
 
-                # 4. Autonomous Agent Watchdog: Detect degradation and trigger intervention
+                # 4. Autonomous Agent Watchdog: Check Grafana alert state and trigger intervention
                 await self._check_and_trigger_autonomous_mission()
 
             except Exception as e:
@@ -228,45 +271,88 @@ class FarmWorker:
 
     async def _check_and_trigger_autonomous_mission(self) -> None:
         """
-        Watches for degraded nodes crossing thermal or failure limits.
-        When detected, automatically triggers the 7-step mission without user intervention.
-        The last successful mission persists on screen until a new one replaces it.
+        Watches for degraded nodes strictly driven by Grafana Cloud Alerting.
+        When Grafana reports the alert rule is firing, automatically triggers the mission.
+        Fails closed: if the rule cannot be read, logs error and does not trigger.
         """
         if not self.mission_runner or self.is_investigating:
             return
 
-        # Check if any node is degraded or overheated
-        overheated_nodes = [
-            n for n in self.simulator.state.nodes.values()
-            if n.temperature_celsius > n.thermal_limit_celsius or n.status == NodeStatus.THROTTLED
-        ]
+        if not self.alert_rule_uid:
+            await self._init_alert_rule()
+            if not self.alert_rule_uid:
+                return
 
-        if overheated_nodes:
-            target_node = overheated_nodes[0]
-            if self._last_investigated_node != target_node.id:
-                logger.info(
-                    "Autonomous watchdog detected anomaly on %s (%.1f°C). Running 7-step mission...",
-                    target_node.id,
-                    target_node.temperature_celsius,
-                )
-                self.is_investigating = True
-                self._last_investigated_node = target_node.id
-                self._mission_task = asyncio.create_task(self._run_autonomous_mission(target_node.id))
+        params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
+        toolset = create_grafana_mcp_toolset(params)
 
-    async def _run_autonomous_mission(self, target_node_id: str) -> None:
         try:
-            # Allow 8 seconds for telemetry to be written and indexed in Grafana Cloud
-            await asyncio.sleep(8.0)
-            trigger = self._pending_trigger_type or "cycle_boundary"
-            self._pending_trigger_type = None
+            rule_data = await get_alert_rule(toolset, self.alert_rule_uid)
+            self.alert_rule_status = "ok"
+            self.alert_rule_error = None
+        except Exception as ex:
+            self.alert_rule_status = "error"
+            self.alert_rule_error = str(ex)
+            logger.warning("Failed to poll Grafana alert rule %s: %s (failing closed)", self.alert_rule_uid, ex)
+            return
+
+        rule_state = str(rule_data.get("state", "")).lower()
+        if rule_state == "firing":
+            alerts = rule_data.get("alerts", [])
+            firing_alert = next((a for a in alerts if a.get("state") == "Alerting"), None)
+            if not firing_alert and alerts:
+                firing_alert = alerts[0]
+
+            if firing_alert:
+                target_node = firing_alert.get("labels", {}).get("node_id", "node-07")
+                if self._last_investigated_node != target_node:
+                    self.alert_firing_observed_at = time.time()
+                    logger.info(
+                        "Watchdog observed Grafana alert %s FIRING for %s (activeAt: %s). Running mission...",
+                        self.alert_rule_uid,
+                        target_node,
+                        firing_alert.get("activeAt"),
+                    )
+                    self.is_investigating = True
+                    self._last_investigated_node = target_node
+                    alert_evidence = {
+                        "rule_uid": self.alert_rule_uid,
+                        "labels": firing_alert.get("labels", {}),
+                        "activeAt": firing_alert.get("activeAt", ""),
+                        "state": "Alerting",
+                    }
+                    self._mission_task = asyncio.create_task(
+                        self._run_autonomous_mission(target_node, alert_evidence)
+                    )
+
+    async def _run_autonomous_mission(self, target_node_id: str, alert_evidence: Dict[str, Any]) -> None:
+        try:
+            self.mission_started_at = time.time()
+            fault_to_firing = (
+                self.alert_firing_observed_at - self.fault_injected_at
+                if (self.alert_firing_observed_at and self.fault_injected_at)
+                else None
+            )
+            firing_to_start = (
+                self.mission_started_at - self.alert_firing_observed_at
+                if (self.mission_started_at and self.alert_firing_observed_at)
+                else None
+            )
+            logger.info(
+                "Autonomous mission starting for %s: fault_to_firing=%s, firing_to_start=%s",
+                target_node_id,
+                f"{fault_to_firing:.2f}s" if fault_to_firing is not None else "N/A",
+                f"{firing_to_start:.2f}s" if firing_to_start is not None else "N/A",
+            )
             res = await self.mission_runner.execute_mission(
                 show_id="show-aethelgard",
-                trigger_type=trigger,
+                trigger_type="grafana_alert",
+                scenario_primed_by=self.scenario_primed_by,
+                alert_evidence=alert_evidence,
             )
             self.missions_this_instance += 1
-            # Atomically update latest_mission
             self.latest_mission = res.model_dump(mode="json")
-            logger.info("Autonomous mission completed successfully for %s (trigger: %s)", target_node_id, trigger)
+            logger.info("Autonomous mission completed successfully for %s (trigger: grafana_alert)", target_node_id)
         except Exception as ex:
             logger.error("Autonomous mission execution failed: %s", ex, exc_info=True)
         finally:
@@ -278,8 +364,11 @@ class FarmWorker:
         self.simulator.inject_scenario(scenario)
         self._last_investigated_node = None
         self.is_investigating = False
-        self._pending_trigger_type = "demo"
-        logger.info("Injected scenario: %s (watchdog re-armed, trigger: demo)", scenario.value)
+        self.scenario_primed_by = "demo"
+        self.fault_injected_at = time.time()
+        self.alert_firing_observed_at = None
+        self.mission_started_at = None
+        logger.info("Injected scenario: %s (watchdog re-armed, primed_by: demo)", scenario.value)
 
     def reallocate_shot(self, shot_id: str, target_node_id: str) -> dict:
         """Executes a shot reallocation on the running simulator."""
@@ -308,6 +397,7 @@ class FarmWorker:
                 show_id=show_id,
                 force_verification_fault=force_verification_fault,
                 trigger_type=trigger_type,
+                scenario_primed_by=self.scenario_primed_by,
             )
             self.missions_this_instance += 1
             self.latest_mission = res.model_dump(mode="json")

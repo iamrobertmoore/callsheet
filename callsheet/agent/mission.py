@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from google.genai import Client, types
 
+from callsheet.agent.alerting import get_alert_rule, PRODUCTION_ALERT_RULE_UID
 from callsheet.agent.prompts import (
     CALLSHEET_AGENT_SYSTEM_PROMPT,
     CALLSHEET_SUMMARY_PROMPT_TEMPLATE,
@@ -75,7 +76,8 @@ class MissionResult(BaseModel):
     time_intervention_to_resolved_seconds: Optional[float] = None
     mcp_read_calls: int = 0
     mcp_write_calls: int = 0
-    trigger_type: str = "cycle_boundary"
+    trigger_type: str = "grafana_alert"
+    scenario_primed_by: Optional[str] = "cycle_boundary"
 
 
 def parse_loki_timestamp(ts_raw: Any) -> Optional[float]:
@@ -361,10 +363,13 @@ class MultiStepMissionRunner:
         force_verification_fault: bool = False,
         poll_interval_seconds: Optional[float] = None,
         max_poll_seconds: Optional[float] = None,
-        trigger_type: str = "cycle_boundary",
+        trigger_type: str = "grafana_alert",
+        scenario_primed_by: Optional[str] = None,
+        alert_evidence: Optional[Dict[str, Any]] = None,
     ) -> MissionResult:
         """
         Runs the complete 7-step closed-loop mission strictly driven by Grafana Cloud MCP responses:
+        0. Grafana Alert Trigger (Alert-driven autonomous loop) - DETERMINISTIC_ALERT
         1. Anomaly Detection (Prometheus response parsing) - DETERMINISTIC_TELEMETRY
         2. Signal Correlation (Loki Logs & Tempo Trace Spans response parsing) - DETERMINISTIC_TELEMETRY
         3. Root Cause Deduction (Vertex AI Gemini reasoning over retrieved signals) - GENERATIVE_SYNTHESIS
@@ -379,6 +384,59 @@ class MultiStepMissionRunner:
         params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
         toolset = create_grafana_mcp_toolset(params)
         self.dashboard_uid = await self._discover_dashboard_uid(toolset)
+
+        # ---------------------------------------------------------
+        # STEP 0: GRAFANA ALERT TRIGGER (Alert-driven autonomous loop)
+        # ---------------------------------------------------------
+        if not alert_evidence and trigger_type == "grafana_alert":
+            try:
+                rule_uid = PRODUCTION_ALERT_RULE_UID if self.deployment_id == "cloud-run" else "cfxbt56wwbocge"
+                rule_info = await get_alert_rule(toolset, rule_uid)
+                if rule_info:
+                    alerts = rule_info.get("alerts", [])
+                    active_alert = next((a for a in alerts if a.get("state") == "Alerting"), None)
+                    if not active_alert and alerts:
+                        active_alert = alerts[0]
+                    if active_alert:
+                        alert_evidence = {
+                            "rule_uid": rule_uid,
+                            "labels": active_alert.get("labels", {}),
+                            "activeAt": active_alert.get("activeAt", ""),
+                            "state": "Alerting",
+                        }
+            except Exception as ex:
+                logger.warning("Could not fetch alert evidence for Step 0: %s", ex)
+
+        if alert_evidence:
+            alert_node = alert_evidence.get("labels", {}).get("node_id", "node-07")
+            active_at_raw = alert_evidence.get("activeAt", "")
+            active_time_str = ""
+            if active_at_raw:
+                try:
+                    dt = datetime.fromisoformat(str(active_at_raw).replace("Z", "+00:00"))
+                    active_time_str = dt.strftime("%H:%M:%S")
+                except Exception:
+                    active_time_str = str(active_at_raw)
+            desc = (
+                f"Alert received from Grafana: {alert_node}, active since {active_time_str} UTC."
+                if active_time_str
+                else f"Alert received from Grafana: {alert_node}."
+            )
+            step0 = MissionStep(
+                step_number=0,
+                name="Grafana Alert Trigger",
+                execution_type="DETERMINISTIC_ALERT",
+                description=desc,
+                evidence={
+                    "tool": "alerting_manage_rules",
+                    "rule_uid": alert_evidence.get("rule_uid", ""),
+                    "labels": alert_evidence.get("labels", {}),
+                    "activeAt": active_at_raw,
+                    "state": alert_evidence.get("state", "Alerting"),
+                },
+                status="COMPLETED",
+            )
+            steps.append(step0)
 
         # ---------------------------------------------------------
         # STEP 1: DETECT METRIC ANOMALY (Parse Prometheus Response with retry)
@@ -1510,4 +1568,5 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             mcp_read_calls=self.mcp_read_calls,
             mcp_write_calls=self.mcp_write_calls,
             trigger_type=trigger_type,
+            scenario_primed_by=scenario_primed_by or "cycle_boundary",
         )

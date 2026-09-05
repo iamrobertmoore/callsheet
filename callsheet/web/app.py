@@ -70,17 +70,25 @@ class ScenarioRequest(BaseModel):
 class MissionRequest(BaseModel):
     show_id: Optional[str] = "show-aethelgard"
     force_verification_fault: Optional[bool] = False
+    trigger_type: Optional[str] = "api"
+    scenario_primed_by: Optional[str] = None
 
 
 @app.get("/api/health")
 async def health_check():
+    is_healthy = (worker.alert_rule_status != "error")
     return {
-        "status": "healthy",
+        "status": "healthy" if is_healthy else "degraded",
         "service": "callsheet",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "worker_running": worker._running,
         "instance_started_at": worker.instance_started_at,
         "missions_this_instance": worker.missions_this_instance,
+        "deployment_id": worker.deployment_id,
+        "alert_rule_status": worker.alert_rule_status,
+        "alert_rule_uid": worker.alert_rule_uid,
+        "alert_rule_error": worker.alert_rule_error,
+        "scenario_primed_by": worker.scenario_primed_by,
         "tick_cadence": worker.tick_cadence_stats,
     }
 
@@ -99,6 +107,9 @@ async def get_farm_state():
         "is_investigating": worker.is_investigating,
         "interventions_count": len(dispatcher.history),
         "verification_progress": worker.verification_progress,
+        "scenario_primed_by": worker.scenario_primed_by,
+        "alert_rule_status": worker.alert_rule_status,
+        "alert_rule_uid": worker.alert_rule_uid,
         "tick_cadence": worker.tick_cadence_stats,
     }
     return JSONResponse(
@@ -131,10 +142,15 @@ async def inject_scenario(req: ScenarioRequest):
 async def run_mission(req: MissionRequest):
     """Executes the 7-step observability, intervention, and post-verification mission."""
     try:
+        trigger_type = req.trigger_type or "api"
+        scenario_primed_by = req.scenario_primed_by or worker.scenario_primed_by
         result = await mission_runner.execute_mission(
             show_id=req.show_id or "show-aethelgard",
             force_verification_fault=bool(req.force_verification_fault),
+            trigger_type=trigger_type,
+            scenario_primed_by=scenario_primed_by,
         )
+        worker.missions_this_instance += 1
         worker.latest_mission = result.model_dump(mode="json")
         return JSONResponse(
             content=worker.latest_mission,
@@ -300,22 +316,22 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
 
         crit_class = ' critical' if critical else ''
         cards.append(f"""
-            <div class="slate-card{crit_class}">
+            <div class="slate-card{crit_class}" id="slate-card-{show_id}">
                 <div class="slate-header">
                     <div>
                         <div class="show-title">{show_name}</div>
                         <div class="show-client">{show_client}</div>
                     </div>
-                    {status_tag}
+                    <div class="slate-header-tag">{status_tag}</div>
                 </div>
                 <div class="slate-metrics">
                     <div class="metric-row">
                         <span class="metric-label">DEADLINE</span>
-                        <span class="metric-val">{deadline_str}</span>
+                        <span class="metric-val deadline-val">{deadline_str}</span>
                     </div>
                     <div class="metric-row">
                         <span class="metric-label">BUFFER MARGIN</span>
-                        <span class="metric-val metric-healthy">{buffer_margin}</span>
+                        <span class="metric-val metric-healthy buffer-margin-val">{buffer_margin}</span>
                     </div>
                     <div class="metric-row">
                         <span class="metric-label">DAILY PENALTY</span>
@@ -365,7 +381,9 @@ def render_ssr_trail(steps: list) -> str:
         evidence = step.get("evidence") if isinstance(step, dict) else getattr(step, "evidence", {})
         evidence_str = json.dumps(evidence, indent=2) if evidence else ""
 
-        if step_num in (3, 7) or exec_type == "GENERATIVE_SYNTHESIS":
+        if step_num == 0:
+            badge_html = '<span class="badge-det">GRAFANA ALERT</span>'
+        elif step_num in (3, 7) or exec_type == "GENERATIVE_SYNTHESIS":
             badge_html = '<span class="badge-gen">GENERATIVE AI</span>'
         else:
             badge_html = '<span class="badge-det">DETERMINISTIC</span>'
@@ -519,7 +537,7 @@ def render_ssr_briefing(mission: Optional[dict]) -> str:
     if panel_img:
         cards.append(f"""
             <div class="panel-snapshot-box">
-                <img src="{panel_img}" alt="Grafana Control Tower Panel Snapshot" loading="lazy" />
+                <img src="{panel_img}" alt="Grafana Control Tower Panel Snapshot" />
                 <div class="panel-snapshot-meta">
                     <span>CONTROL TOWER PANEL SNAPSHOT (get_panel_image)</span>
                     <span>MCP TOOL CALLS: {reads} READS / {writes} WRITES</span>
@@ -1306,10 +1324,16 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             border-radius: 2px;
             overflow: hidden;
             background: #0b0c0e;
+            width: 100%;
+            aspect-ratio: 2 / 1;
+            display: flex;
+            flex-direction: column;
         }
         .panel-snapshot-box img {
             width: 100%;
-            height: auto;
+            flex: 1 1 auto;
+            min-height: 0;
+            object-fit: cover;
             display: block;
         }
         .panel-snapshot-meta {
@@ -1321,6 +1345,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             justify-content: space-between;
             align-items: center;
             border-top: 1px solid var(--rule);
+            background: #0b0c0e;
+            flex-shrink: 0;
         }
 
         /* Footer Disclosure */
@@ -1445,6 +1471,13 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <script>
+        let lastRenderedMissionId = "<!-- SSR_MISSION_ID -->";
+        let lastRenderedVerificationStatus = "<!-- SSR_VERIFICATION_STATUS -->";
+        let lastRenderedIncidentStatus = "<!-- SSR_INCIDENT_STATUS -->";
+        let lastRenderedStepsLength = <!-- SSR_STEPS_LENGTH -->;
+        let lastRenderedVerificationActive = false;
+        let lastRenderedVerificationElapsed = null;
+
         function updateClock() {
             const now = new Date();
             document.getElementById('utc-clock').innerText = now.toUTCString().split(' ')[4] + ' UTC';
@@ -1594,16 +1627,53 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                         const margin = (sh118.delivery_margin_hours_achieved !== undefined && sh118.delivery_margin_hours_achieved !== null)
                             ? Number(sh118.delivery_margin_hours_achieved).toFixed(1)
                             : '2.5';
-                        banner.textContent = `Shot 118 delivered ${hr}:${mn} UTC, ${margin} hours ahead of deadline`;
-                        banner.style.display = 'flex';
+                        const bannerText = `Shot 118 delivered ${hr}:${mn} UTC, ${margin} hours ahead of deadline`;
+                        if (banner.textContent !== bannerText) banner.textContent = bannerText;
+                        if (banner.style.display !== 'flex') banner.style.display = 'flex';
                     } else {
-                        banner.style.display = 'none';
+                        if (banner.style.display !== 'none') banner.style.display = 'none';
                     }
                 }
 
-                if (data.latest_mission) {
-                    renderBriefing(data.latest_mission);
-                    renderTrail(data.latest_mission.steps);
+                const mission = data.latest_mission;
+                const vProgress = data.verification_progress;
+                const vActive = vProgress ? vProgress.active : false;
+                const vElapsed = vProgress ? vProgress.elapsed_seconds : null;
+                const missionId = mission ? (mission.id || mission.mission_id || null) : null;
+                const vStatus = mission ? mission.verification_status : null;
+                const incStatus = mission ? mission.incident_status : null;
+                const stepsLen = (mission && mission.steps) ? mission.steps.length : 0;
+
+                const shouldRerenderBriefing = (
+                    mission && (
+                        missionId !== lastRenderedMissionId ||
+                        vStatus !== lastRenderedVerificationStatus ||
+                        incStatus !== lastRenderedIncidentStatus
+                    )
+                );
+
+                const shouldRerenderTrail = (
+                    mission && (
+                        missionId !== lastRenderedMissionId ||
+                        vStatus !== lastRenderedVerificationStatus ||
+                        vActive !== lastRenderedVerificationActive ||
+                        (vActive && vElapsed !== lastRenderedVerificationElapsed) ||
+                        stepsLen !== lastRenderedStepsLength
+                    )
+                );
+
+                if (shouldRerenderBriefing) {
+                    renderBriefing(mission);
+                    lastRenderedMissionId = missionId;
+                    lastRenderedVerificationStatus = vStatus;
+                    lastRenderedIncidentStatus = incStatus;
+                }
+
+                if (shouldRerenderTrail) {
+                    renderTrail(mission.steps);
+                    lastRenderedVerificationActive = vActive;
+                    lastRenderedVerificationElapsed = vElapsed;
+                    lastRenderedStepsLength = stepsLen;
                 }
 
                 renderFleet(data.nodes, data.latest_mission);
@@ -1620,21 +1690,21 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
             const isIntervened = latestMission && latestMission.intervention_record;
 
-            container.innerHTML = showList.map(s => {
-                let statusTag = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>';
+            showList.forEach(s => {
+                let statusTagHtml = '<span class="state-tag tag-scheduled">ON SCHEDULE</span>';
                 let bufferMargin = '+5.5 hours';
 
                 if (s.id === 'show-aethelgard') {
                     if (verificationProgress && verificationProgress.active) {
-                        statusTag = '<span class="state-tag tag-slipping">VERIFYING (' + verificationProgress.elapsed_seconds + 's)</span>';
+                        statusTagHtml = '<span class="state-tag tag-slipping">VERIFYING (' + verificationProgress.elapsed_seconds + 's)</span>';
                         bufferMargin = 'Verifying';
                     } else if (isIntervened) {
                         if (latestMission.verification_status === 'ESCALATED') {
-                            statusTag = '<span class="state-tag tag-critical">ESCALATED</span>';
+                            statusTagHtml = '<span class="state-tag tag-critical">ESCALATED</span>';
                         } else if (latestMission.verification_status === 'VERIFICATION_INCONCLUSIVE') {
-                            statusTag = '<span class="state-tag tag-slipping">INCONCLUSIVE</span>';
+                            statusTagHtml = '<span class="state-tag tag-slipping">INCONCLUSIVE</span>';
                         } else {
-                            statusTag = '<span class="state-tag tag-protected">VERIFIED PROTECTED</span>';
+                            statusTagHtml = '<span class="state-tag tag-protected">VERIFIED PROTECTED</span>';
                         }
                         bufferMargin = '+' + (latestMission.intervention_record.buffer_margin_hours || 2.8).toFixed(1) + ' hours';
                     } else {
@@ -1657,23 +1727,40 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 const minStr = String(dObj.getUTCMinutes()).padStart(2, '0');
                 const deadlineFormatted = `${dayStr}, ${dateStr} ${monStr} ${yrStr} ${hrStr}:${minStr} UTC`;
 
-                return `
-                    <div class="slate-card ${s.critical_path ? 'critical' : ''}">
+                const cardEl = document.getElementById(`slate-card-${s.id}`);
+                if (cardEl) {
+                    const headerTagEl = cardEl.querySelector('.slate-header-tag');
+                    if (headerTagEl && headerTagEl.innerHTML !== statusTagHtml) {
+                        headerTagEl.innerHTML = statusTagHtml;
+                    }
+                    const marginEl = cardEl.querySelector('.buffer-margin-val');
+                    if (marginEl && marginEl.textContent !== bufferMargin) {
+                        marginEl.textContent = bufferMargin;
+                    }
+                    const deadlineEl = cardEl.querySelector('.deadline-val');
+                    if (deadlineEl && deadlineEl.textContent !== deadlineFormatted) {
+                        deadlineEl.textContent = deadlineFormatted;
+                    }
+                } else {
+                    const newCard = document.createElement('div');
+                    newCard.className = `slate-card ${s.critical_path ? 'critical' : ''}`;
+                    newCard.id = `slate-card-${s.id}`;
+                    newCard.innerHTML = `
                         <div class="slate-header">
                             <div>
                                 <div class="show-title">${s.name}</div>
                                 <div class="show-client">${s.client}</div>
                             </div>
-                            ${statusTag}
+                            <div class="slate-header-tag">${statusTagHtml}</div>
                         </div>
                         <div class="slate-metrics">
                             <div class="metric-row">
                                 <span class="metric-label">DEADLINE</span>
-                                <span class="metric-val">${deadlineFormatted}</span>
+                                <span class="metric-val deadline-val">${deadlineFormatted}</span>
                             </div>
                             <div class="metric-row">
                                 <span class="metric-label">BUFFER MARGIN</span>
-                                <span class="metric-val metric-healthy">${bufferMargin}</span>
+                                <span class="metric-val metric-healthy buffer-margin-val">${bufferMargin}</span>
                             </div>
                             <div class="metric-row">
                                 <span class="metric-label">DAILY PENALTY</span>
@@ -1684,9 +1771,10 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                                 <span class="metric-val">${s.critical_path ? 'CRITICAL PATH' : 'STANDARD'}</span>
                             </div>
                         </div>
-                    </div>
-                `;
-            }).join('');
+                    `;
+                    container.appendChild(newCard);
+                }
+            });
         }
 
         function renderBriefing(mission) {
@@ -1743,7 +1831,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     const writes = mission.mcp_write_calls || 0;
                     writebackHtml += `
                         <div class="panel-snapshot-box">
-                            <img src="${mission.panel_image_url}" alt="Grafana Control Tower Panel Snapshot" loading="lazy" />
+                            <img src="${mission.panel_image_url}" alt="Grafana Control Tower Panel Snapshot" />
                             <div class="panel-snapshot-meta">
                                 <span>CONTROL TOWER PANEL SNAPSHOT (get_panel_image)</span>
                                 <span>MCP TOOL CALLS: ${reads} READS / ${writes} WRITES</span>
@@ -1772,11 +1860,12 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 }
 
                 const execType = step.execution_type || 'DETERMINISTIC';
-                const stepNum = step.step_number || 1;
+                const stepNum = step.step_number !== undefined ? step.step_number : 1;
                 const isGen = (stepNum === 3 || stepNum === 7 || execType === 'GENERATIVE_SYNTHESIS');
-                const badgeHtml = isGen 
-                    ? '<span class="badge-gen">GENERATIVE AI</span>' 
-                    : '<span class="badge-det">DETERMINISTIC</span>';
+                const isAlert = (stepNum === 0);
+                const badgeHtml = isAlert 
+                    ? '<span class="badge-det">GRAFANA ALERT</span>' 
+                    : (isGen ? '<span class="badge-gen">GENERATIVE AI</span>' : '<span class="badge-det">DETERMINISTIC</span>');
 
                 const stepName = (step.name || '').toUpperCase();
 
@@ -1803,13 +1892,14 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             const quarantinedCount = nodeList.filter(n => n.status === 'QUARANTINED').length;
             const standbyCount = nodeList.filter(n => n.is_standby).length;
             
-            if (quarantinedCount > 0) {
-                summaryLabel.innerText = `${activeCount} ACTIVE / ${quarantinedCount} QUARANTINED / ${standbyCount} STANDBY`;
-            } else {
-                summaryLabel.innerText = `${activeCount} ACTIVE / ${standbyCount} STANDBY`;
+            const summaryText = (quarantinedCount > 0)
+                ? `${activeCount} ACTIVE / ${quarantinedCount} QUARANTINED / ${standbyCount} STANDBY`
+                : `${activeCount} ACTIVE / ${standbyCount} STANDBY`;
+            if (summaryLabel && summaryLabel.innerText !== summaryText) {
+                summaryLabel.innerText = summaryText;
             }
 
-            container.innerHTML = nodeList.map(n => {
+            nodeList.forEach(n => {
                 let nodeClass = 'node-tile';
                 let tempColor = 'var(--state-healthy)';
                 let shotLabel = 'IDLE';
@@ -1851,17 +1941,37 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     shotLabel = n.current_shot_id ? 'SHOT ' + n.current_shot_id.replace('sh_', '') : 'COOL ACTIVE';
                 }
 
-                return `
-                    <div class="${nodeClass}" id="tile-${n.id}" data-node="${n.id}">
+                const tileEl = document.getElementById(`tile-${n.id}`);
+                if (tileEl) {
+                    if (tileEl.className !== nodeClass) {
+                        tileEl.className = nodeClass;
+                    }
+                    const tempEl = tileEl.querySelector('.node-temp');
+                    if (tempEl) {
+                        const tempText = `${tempVal.toFixed(1)}°C`;
+                        if (tempEl.textContent !== tempText) tempEl.textContent = tempText;
+                        if (tempEl.style.color !== tempColor) tempEl.style.color = tempColor;
+                    }
+                    const shotEl = tileEl.querySelector('.node-shot');
+                    if (shotEl && shotEl.textContent !== shotLabel) {
+                        shotEl.textContent = shotLabel;
+                    }
+                } else {
+                    const newTile = document.createElement('div');
+                    newTile.className = nodeClass;
+                    newTile.id = `tile-${n.id}`;
+                    newTile.setAttribute('data-node', n.id);
+                    newTile.innerHTML = `
                         <div class="node-tile-header">
                             <span class="node-id">${n.id.toUpperCase()}</span>
                             <span class="node-pip"></span>
                         </div>
                         <div class="node-temp" style="color: ${tempColor};">${tempVal.toFixed(1)}°C</div>
                         <div class="node-shot">${shotLabel}</div>
-                    </div>
-                `;
-            }).join('');
+                    `;
+                    container.appendChild(newTile);
+                }
+            });
 
             // Trigger signature failover transfer motion once on load if an intervention happened
             if (!window.__failoverAnimated && (quarantinedCount > 0 || (latestMission && latestMission.intervention_record))) {
@@ -2116,6 +2226,11 @@ async def get_producer_dashboard():
     else:
         time_label = "Autonomous Watch Active"
 
+    mission_id = (mission.get("id") or mission.get("mission_id") or "") if mission else ""
+    verification_status = mission.get("verification_status", "") if mission else ""
+    incident_status = mission.get("incident_status", "") if mission else ""
+    steps_len = len(steps)
+
     html = (
         PRODUCER_UI_TEMPLATE
         .replace("<!-- SSR_DELIVERY_BANNER -->", delivery_banner_html)
@@ -2125,6 +2240,10 @@ async def get_producer_dashboard():
         .replace("<!-- SSR_TRAIL -->", trail_html)
         .replace("<!-- SSR_FLEET_SUMMARY -->", fleet_summary)
         .replace("<!-- SSR_FLEET -->", fleet_html)
+        .replace("<!-- SSR_MISSION_ID -->", mission_id)
+        .replace("<!-- SSR_VERIFICATION_STATUS -->", verification_status)
+        .replace("<!-- SSR_INCIDENT_STATUS -->", incident_status)
+        .replace("<!-- SSR_STEPS_LENGTH -->", str(steps_len))
     )
     return HTMLResponse(
         content=html,

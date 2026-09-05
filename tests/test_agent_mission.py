@@ -128,21 +128,29 @@ async def test_full_six_step_mission_against_live_grafana():
         # Verify mission structure and genuine data extraction
         assert result.show_id == "show-aethelgard"
         assert result.anomalous_node_id == "node-07"
-        assert len(result.steps) == 7
+        assert len(result.steps) in (7, 8)
         assert result.intervention_record is not None
         assert result.intervention_record.previous_node_id == "node-07"
         assert result.intervention_record.target_node_id.startswith("node-")
         assert result.intervention_record.status == "PROTECTED"
         assert result.verification_status == "VERIFIED_PROTECTED"
 
+        # Verify Step 0 if present
+        step0 = next((s for s in result.steps if s.step_number == 0), None)
+        if step0:
+            assert step0.execution_type == "DETERMINISTIC_ALERT"
+            assert "node-07" in step0.description
+
         # Verify Step 6 (Post-Intervention Telemetry Verification)
-        assert result.steps[5].name == "Post-Intervention Telemetry Verification (Grafana Cloud)"
-        assert result.steps[5].execution_type == "DETERMINISTIC_VERIFICATION"
-        assert result.steps[5].evidence["verification_passed"] is True
-        assert result.steps[5].evidence["target_node"].startswith("node-")
+        step6 = next(s for s in result.steps if s.step_number == 6)
+        assert step6.name == "Post-Intervention Telemetry Verification (Grafana Cloud)"
+        assert step6.execution_type == "DETERMINISTIC_VERIFICATION"
+        assert step6.evidence["verification_passed"] is True
+        assert step6.evidence["target_node"].startswith("node-")
 
         # Verify Step 7 (Producer Callsheet Briefing)
-        assert result.steps[6].name == "Producer Callsheet Briefing"
+        step7 = next(s for s in result.steps if s.step_number == 7)
+        assert step7.name == "Producer Callsheet Briefing"
         assert len(result.callsheet_briefing) > 50
 
         # Verify Section 2 Write-back artifacts and metrics
@@ -282,11 +290,12 @@ async def test_post_intervention_verification_escalation_path():
             tick_task.cancel()
             await asyncio.gather(tick_task, return_exceptions=True)
 
-        assert len(result.steps) == 7
+        assert len(result.steps) in (7, 8)
         assert result.verification_status == "ESCALATED"
         assert result.intervention_record.status == "ESCALATED"
-        assert result.steps[5].evidence["verification_passed"] is False
-        assert "HUMAN" in result.steps[5].evidence["human_recommendation"].upper()
+        step6 = next(s for s in result.steps if s.step_number == 6)
+        assert step6.evidence["verification_passed"] is False
+        assert "HUMAN" in step6.evidence["human_recommendation"].upper()
         assert "—" not in result.callsheet_briefing
 
         # Verify incident creation for escalation path
