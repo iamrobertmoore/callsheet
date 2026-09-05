@@ -413,6 +413,7 @@ class MultiStepMissionRunner:
         steps: List[MissionStep] = []
         self.mission_mcp_read_calls = 0
         self.mission_mcp_write_calls = 0
+        mission_id = f"mission_{uuid.uuid4().hex[:8]}"
 
         # Connect to MCP toolset
         params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
@@ -1699,8 +1700,6 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         briefing_text = response.text.strip()
         briefing_text = briefing_text.replace("Callshet", "Callsheet")
         briefing_text = briefing_text.replace("\u2014", " - ").replace("\u2013", "-")
-
-        mission_id = f"mission_{uuid.uuid4().hex[:8]}"
 
         # Capture Panel Image via MCP get_panel_image
         panel_image_url = None
