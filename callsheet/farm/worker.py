@@ -333,28 +333,32 @@ class FarmWorker:
 
         rule_state = str(rule_data.get("state", "")).lower()
         if rule_state == "firing":
-            alerts = rule_data.get("alerts", [])
-            firing_alert = next((a for a in alerts if a.get("state") == "Alerting"), None)
-            if not firing_alert and alerts:
-                firing_alert = alerts[0]
+            alerts = [a for a in rule_data.get("alerts", []) if a.get("state") == "Alerting"]
+            if not alerts and rule_data.get("alerts"):
+                alerts = rule_data.get("alerts")
 
-            if firing_alert:
-                active_at_raw = firing_alert.get("activeAt", "")
-                # Watchdog hygiene: ignore any alert instance whose activeAt is earlier than scenario_primed_at
+            firing_alert = None
+            for a in alerts:
+                active_at_raw = a.get("activeAt", "")
+                # Watchdog hygiene: ignore any alert instance whose activeAt is earlier than scenario_primed_at (allowing 65s scheduler floor tolerance)
                 if self.scenario_primed_at and active_at_raw:
                     try:
                         dt_active = datetime.fromisoformat(str(active_at_raw).replace("Z", "+00:00"))
                         dt_primed = datetime.fromisoformat(str(self.scenario_primed_at).replace("Z", "+00:00"))
-                        if dt_active < (dt_primed - timedelta(seconds=1)):
+                        if dt_active < (dt_primed - timedelta(seconds=65)):
                             logger.info(
                                 "Watchdog ignoring stale alert instance (activeAt: %s < primed_at: %s)",
                                 active_at_raw,
                                 self.scenario_primed_at,
                             )
-                            return
+                            continue
                     except Exception as parse_ex:
                         logger.warning("Error parsing alert activeAt or primed_at: %s", parse_ex)
 
+                firing_alert = a
+                break
+
+            if firing_alert:
                 target_node = firing_alert.get("labels", {}).get("node_id", "node-07")
                 if self._last_investigated_node != target_node:
                     self.alert_firing_observed_at = time.time()
@@ -362,14 +366,14 @@ class FarmWorker:
                         "Watchdog observed Grafana alert %s FIRING for %s (activeAt: %s). Running mission...",
                         self.alert_rule_uid,
                         target_node,
-                        active_at_raw,
+                        firing_alert.get("activeAt", ""),
                     )
                     self.is_investigating = True
                     self._last_investigated_node = target_node
                     alert_evidence = {
                         "rule_uid": self.alert_rule_uid,
                         "labels": firing_alert.get("labels", {}),
-                        "activeAt": active_at_raw,
+                        "activeAt": firing_alert.get("activeAt", ""),
                         "state": "Alerting",
                     }
                     self._mission_task = asyncio.create_task(
