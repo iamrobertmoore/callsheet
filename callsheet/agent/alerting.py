@@ -53,6 +53,47 @@ async def get_alert_rule(toolset, rule_uid: str) -> Dict[str, Any]:
     return {}
 
 
+async def ensure_rule_group_interval(
+    toolset,
+    folder_uid: str = CALLSHEET_FOLDER_UID,
+    group_name: str = CALLSHEET_RULE_GROUP,
+    interval_seconds: int = 10,
+) -> None:
+    """Ensures that the alert rule group evaluation interval is set to the specified seconds (default 10s)."""
+    try:
+        res = await toolset._execute_with_session(
+            lambda session: session.call_tool(
+                "grafana_api_request",
+                arguments={
+                    "endpoint": f"/api/v1/provisioning/folder/{folder_uid}/rule-groups/{group_name}",
+                    "method": "GET",
+                },
+            ),
+            f"Get rule group {group_name}",
+        )
+        if hasattr(res, "content") and res.content:
+            text = getattr(res.content[0], "text", "")
+            if text:
+                data = json.loads(text).get("data", {})
+                if data and data.get("interval") != interval_seconds:
+                    data["interval"] = interval_seconds
+                    await toolset._execute_with_session(
+                        lambda session: session.call_tool(
+                            "grafana_api_request",
+                            arguments={
+                                "endpoint": f"/api/v1/provisioning/folder/{folder_uid}/rule-groups/{group_name}",
+                                "method": "PUT",
+                                "body": json.dumps(data),
+                                "headers": {"Content-Type": "application/json"},
+                            },
+                        ),
+                        f"Set rule group {group_name} interval to {interval_seconds}s",
+                    )
+                    logger.info("Updated rule group %s interval to %ds", group_name, interval_seconds)
+    except Exception as ex:
+        logger.warning("Could not set rule group interval for %s: %s", group_name, ex)
+
+
 async def ensure_alert_rule(toolset, deployment_id: str) -> Dict[str, Any]:
     """
     Ensures that an alert rule for the specified deployment_id exists.
@@ -91,6 +132,7 @@ async def ensure_alert_rule(toolset, deployment_id: str) -> Dict[str, Any]:
             pass
         curr_summary = existing_rule.get("annotations", {}).get("summary", "")
         if "render_farm_node_active_shot" in curr_expr and curr_summary == expected_summary:
+            await ensure_rule_group_interval(toolset)
             return existing_rule
 
         # Recreate rule to update condition and annotation with identical UID
