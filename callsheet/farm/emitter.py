@@ -124,7 +124,7 @@ class FarmTelemetryEmitter:
         self.gauge_active_shot = self.meter.create_gauge(
             name="render_farm_node_active_shot",
             description="1 if node has an active shot allocated, 0 otherwise",
-            unit="1",
+            unit="",
         )
 
     def _init_logs(self) -> None:
