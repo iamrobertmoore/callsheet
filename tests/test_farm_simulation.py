@@ -85,7 +85,8 @@ async def test_farm_worker_start_stop():
 def test_buffer_stability_across_full_six_hour_cycle():
     """
     Proves that the protected delivery buffer for Chronicles of Aethelgard: Episode 6
-    remains stably above +2.0 hours at cycle start, mid-cycle, and 5 minutes before rollover.
+    remains stably above +2.0 hours at cycle start, mid-cycle, and 5 minutes before rollover,
+    and remains within 0.2h as frames advance.
     """
     from datetime import datetime, timezone, timedelta
 
@@ -96,8 +97,21 @@ def test_buffer_stability_across_full_six_hour_cycle():
     sim.update_cycle_deadlines(base_epoch)
     sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
     result_start = sim.reallocate_shot("sh_118", "node-11")
-    assert result_start["buffer_margin_hours"] >= 2.0, f"Buffer at start {result_start['buffer_margin_hours']} < 2.0h"
+    initial_margin = result_start["buffer_margin_hours"]
+    assert initial_margin >= 2.0, f"Buffer at start {initial_margin} < 2.0h"
     assert result_start["status"] == "PROTECTED"
+
+    # Advance frames on node-11 over 10 minutes and verify margin remains within 0.2h
+    initial_frames = sim.state.shots["sh_118"].completed_frames
+    for minute in range(1, 11):
+        tick_time = base_epoch + timedelta(minutes=minute)
+        sim.tick(delta_seconds=60.0, current_time=tick_time)
+        curr_margin = sim.calculate_buffer_margin_hours("show-aethelgard")
+        assert abs(curr_margin - initial_margin) <= 0.2, (
+            f"Buffer margin shifted by more than 0.2h at +{minute}m: initial={initial_margin}, curr={curr_margin}"
+        )
+
+    assert sim.state.shots["sh_118"].completed_frames > initial_frames
 
     # 2. Test mid-cycle (t = 3.0h)
     mid_cycle = base_epoch + timedelta(hours=3.0)
@@ -116,6 +130,60 @@ def test_buffer_stability_across_full_six_hour_cycle():
     result_end = sim.reallocate_shot("sh_118", "node-11")
     assert result_end["buffer_margin_hours"] >= 2.0, f"Buffer near end {result_end['buffer_margin_hours']} < 2.0h"
     assert result_end["status"] == "PROTECTED"
+
+
+def test_shot_118_progression_completion_and_queued_dispatch():
+    """
+    Verifies that Shot 118 renders to completion on node-11, records delivery metadata
+    and achieved margin, and triggers dispatch of queued shot sh_155.
+    """
+    from datetime import datetime, timezone, timedelta
+    from callsheet.farm.models import ShotStatus, NodeStatus
+
+    sim = RenderFarmSimulator()
+    base_time = datetime(2026, 8, 26, 12, 0, 0, tzinfo=timezone.utc)
+    sim.update_cycle_deadlines(base_time)
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+
+    sim.reallocate_shot("sh_118", "node-11")
+    shot_118 = sim.state.shots["sh_118"]
+    assert shot_118.completed_frames == 60
+    assert shot_118.total_frames == 300
+    assert shot_118.allocated_node_id == "node-11"
+
+    completed_event_found = False
+    dispatched_event_found = False
+    for i in range(1, 85):
+        sim_time = base_time + timedelta(minutes=i)
+        events = sim.tick(delta_seconds=60.0, current_time=sim_time)
+        for ev in events:
+            if ev.get("type") == "SHOT_COMPLETED" and ev.get("shot_id") == "sh_118":
+                completed_event_found = True
+            if ev.get("type") == "SHOT_DISPATCHED" and ev.get("shot_id") == "sh_155":
+                dispatched_event_found = True
+
+    assert completed_event_found is True
+    assert dispatched_event_found is True
+    assert shot_118.status == ShotStatus.COMPLETED
+    assert shot_118.delivered_at is not None
+    assert shot_118.delivery_margin_hours_achieved is not None
+    assert shot_118.delivery_margin_hours_achieved >= 2.0
+
+    shot_155 = sim.state.shots["sh_155"]
+    assert shot_155.allocated_node_id == "node-11"
+    assert shot_155.status == ShotStatus.RENDERING
+    assert sim.state.nodes["node-11"].current_shot_id == "sh_155"
+
+    # Verify scenario re-injection primes Shot 118 back to node-07 at 60 frames
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    assert shot_118.allocated_node_id == "node-07"
+    assert shot_118.completed_frames == 60
+    assert shot_118.status == ShotStatus.AT_RISK
+    assert shot_118.delivered_at is None
+    assert sim.state.nodes["node-07"].status == NodeStatus.THROTTLED
+    assert sim.state.nodes["node-11"].status == NodeStatus.STANDBY
+    assert shot_155.status == ShotStatus.QUEUED
+    assert shot_155.allocated_node_id is None
 
 
 def test_sampled_temperature_variation_across_injections():

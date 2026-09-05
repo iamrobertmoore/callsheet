@@ -58,6 +58,8 @@ class Shot(BaseModel):
     priority: int = 5
     assigned_at: Optional[datetime] = None
     render_progress_seconds: float = 0.0
+    delivered_at: Optional[datetime] = None
+    delivery_margin_hours_achieved: Optional[float] = None
 
     @property
     def frames_remaining(self) -> int:

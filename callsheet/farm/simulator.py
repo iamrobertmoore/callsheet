@@ -166,11 +166,7 @@ class RenderFarmSimulator:
             return
 
         # Within the current cycle epoch, the delivery deadline is held strictly fixed.
-        if "sh_118" in self.state.shots:
-            sh = self.state.shots["sh_118"]
-            # Active shot batch in flight maintains 240 frames remaining
-            sh.total_frames = 300
-            sh.completed_frames = 60
+        # Shot progress advances realistically with each tick without being pinned.
 
     def inject_scenario(self, scenario: ScenarioType, target_temp: Optional[float] = None) -> None:
         """Injects a specific degradation scenario or restores baseline."""
@@ -182,6 +178,8 @@ class RenderFarmSimulator:
             node.status = NodeStatus.THROTTLED
             node.temperature_celsius = round(target_temp, 1) if target_temp is not None else 95.9  # Exceeds 90C limit
             node.cpu_utilization = 99.0
+            node.current_shot_id = "sh_118"
+            node.current_frame = 1061
 
             # Re-arm standby nodes to ensure spare capacity is available for scenario demo
             for n_id, n in self.state.nodes.items():
@@ -190,13 +188,25 @@ class RenderFarmSimulator:
                     n.status = NodeStatus.STANDBY
                     n.temperature_celsius = 42.0
                     n.current_shot_id = None
-            
-            # Shot 118 re-allocated to node-07 and render time jumps from 20s to 120s
+                    n.current_frame = None
+
+            # Re-queue any shot previously allocated to standby nodes (e.g. sh_155)
+            for s in self.state.shots.values():
+                if s.allocated_node_id in ["node-11", "node-12"]:
+                    s.allocated_node_id = None
+                    s.status = ShotStatus.QUEUED
+
+            # Shot 118 re-allocated to node-07 and re-primed to 60/300 frames
             shot = self.state.shots.get("sh_118")
             if shot:
                 shot.allocated_node_id = "node-07"
+                shot.total_frames = 300
+                shot.completed_frames = 60
+                shot.render_progress_seconds = 0.0
                 shot.current_seconds_per_frame = 120.0
                 shot.status = ShotStatus.AT_RISK
+                shot.delivered_at = None
+                shot.delivery_margin_hours_achieved = None
 
         elif scenario == ScenarioType.MEMORY_LEAK_OOM:
             node = self.state.nodes["node-04"]
@@ -279,13 +289,45 @@ class RenderFarmSimulator:
             "status": "PROTECTED" if margin_hours > 0 else "SLIPPING",
         }
 
-    def tick(self, delta_seconds: float = 5.0) -> list[dict]:
+    def calculate_buffer_margin_hours(
+        self,
+        show_id: str = "show-aethelgard",
+        current_time: Optional[datetime] = None,
+    ) -> float:
+        """
+        Calculates the real-time buffer margin in hours for a given show.
+        """
+        show = self.state.shows.get(show_id)
+        sim_now = current_time or self.state.last_updated or datetime.now(timezone.utc)
+        if not show:
+            return 0.0
+
+        active_shots = [
+            s for s in self.state.shots.values()
+            if s.show_id == show_id and s.status in (ShotStatus.RENDERING, ShotStatus.AT_RISK)
+        ]
+        if not active_shots:
+            completed_shots = [
+                s for s in self.state.shots.values()
+                if s.show_id == show_id and s.status == ShotStatus.COMPLETED and s.delivery_margin_hours_achieved is not None
+            ]
+            if completed_shots:
+                return completed_shots[-1].delivery_margin_hours_achieved
+            return 0.0
+
+        primary_shot = active_shots[0]
+        est_sec_remaining = primary_shot.estimated_time_remaining_seconds()
+        est_completion_time = sim_now + timedelta(seconds=est_sec_remaining)
+        margin_hours = (show.delivery_deadline - est_completion_time).total_seconds() / 3600.0
+        return round(margin_hours, 1)
+
+    def tick(self, delta_seconds: float = 5.0, current_time: Optional[datetime] = None) -> list[dict]:
         """
         Advances the simulation clock by delta_seconds.
         Updates frame completion progress, emits completed frame events, and modulates metrics.
         """
         events = []
-        now = datetime.now(timezone.utc)
+        now = current_time or datetime.now(timezone.utc)
         self.state.last_updated = now
 
         for node_id, node in self.state.nodes.items():
@@ -325,6 +367,12 @@ class RenderFarmSimulator:
 
                 if shot.completed_frames >= shot.total_frames:
                     shot.status = ShotStatus.COMPLETED
+                    shot.delivered_at = now
+                    show = self.state.shows.get(shot.show_id)
+                    deadline = show.delivery_deadline if show else now
+                    margin_sec = (deadline - now).total_seconds()
+                    shot.delivery_margin_hours_achieved = round(margin_sec / 3600.0, 1)
+
                     node.current_shot_id = None
                     node.current_frame = None
                     events.append({
@@ -334,6 +382,30 @@ class RenderFarmSimulator:
                         "show_id": shot.show_id,
                         "node_id": node_id,
                         "timestamp": now.isoformat(),
+                        "delivered_at": now.isoformat(),
+                        "delivery_margin_hours_achieved": shot.delivery_margin_hours_achieved,
                     })
+
+                    # Have node pick up next queued shot for this show
+                    queued_shots = [
+                        s for s in self.state.shots.values()
+                        if s.show_id == shot.show_id and s.status == ShotStatus.QUEUED and s.allocated_node_id is None
+                    ]
+                    if queued_shots:
+                        queued_shots.sort(key=lambda s: s.priority, reverse=True)
+                        next_shot = queued_shots[0]
+                        next_shot.allocated_node_id = node_id
+                        next_shot.status = ShotStatus.RENDERING
+                        next_shot.render_progress_seconds = 0.0
+                        node.current_shot_id = next_shot.id
+                        node.current_frame = 1000 + next_shot.completed_frames + 1
+                        events.append({
+                            "type": "SHOT_DISPATCHED",
+                            "shot_id": next_shot.id,
+                            "shot_code": next_shot.shot_code,
+                            "show_id": next_shot.show_id,
+                            "node_id": node_id,
+                            "timestamp": now.isoformat(),
+                        })
 
         return events

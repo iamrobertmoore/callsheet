@@ -106,6 +106,9 @@ class FarmWorker:
         self.is_investigating = False
         self._last_investigated_node: Optional[str] = None
         self._last_cycle_epoch: Optional[int] = None
+        self.instance_started_at: str = datetime.now(timezone.utc).isoformat()
+        self.missions_this_instance: int = 0
+        self._pending_trigger_type: str = "instance_start"
         self.tick_cadence_history: List[Dict[str, Any]] = []
         self._last_tick_start: Optional[float] = None
 
@@ -176,9 +179,11 @@ class FarmWorker:
 
                 # Handle cycle rollover
                 if self._last_cycle_epoch is None or current_epoch != self._last_cycle_epoch:
-                    logger.info("Cycle epoch change (epoch: %d). Performing full farm reset and priming scenario...", current_epoch)
+                    trigger = "instance_start" if self._last_cycle_epoch is None else "cycle_boundary"
+                    logger.info("Cycle epoch change (epoch: %d, trigger: %s). Performing full farm reset and priming scenario...", current_epoch, trigger)
                     self._last_cycle_epoch = current_epoch
                     self._last_investigated_node = None
+                    self._pending_trigger_type = trigger
                     self.simulator.reset_cycle()
                     self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
 
@@ -252,10 +257,16 @@ class FarmWorker:
         try:
             # Allow 8 seconds for telemetry to be written and indexed in Grafana Cloud
             await asyncio.sleep(8.0)
-            res = await self.mission_runner.execute_mission(show_id="show-aethelgard")
+            trigger = self._pending_trigger_type or "cycle_boundary"
+            self._pending_trigger_type = None
+            res = await self.mission_runner.execute_mission(
+                show_id="show-aethelgard",
+                trigger_type=trigger,
+            )
+            self.missions_this_instance += 1
             # Atomically update latest_mission
             self.latest_mission = res.model_dump(mode="json")
-            logger.info("Autonomous mission completed successfully for %s", target_node_id)
+            logger.info("Autonomous mission completed successfully for %s (trigger: %s)", target_node_id, trigger)
         except Exception as ex:
             logger.error("Autonomous mission execution failed: %s", ex, exc_info=True)
         finally:
@@ -267,7 +278,8 @@ class FarmWorker:
         self.simulator.inject_scenario(scenario)
         self._last_investigated_node = None
         self.is_investigating = False
-        logger.info("Injected scenario: %s (watchdog re-armed)", scenario.value)
+        self._pending_trigger_type = "demo"
+        logger.info("Injected scenario: %s (watchdog re-armed, trigger: demo)", scenario.value)
 
     def reallocate_shot(self, shot_id: str, target_node_id: str) -> dict:
         """Executes a shot reallocation on the running simulator."""
@@ -281,7 +293,12 @@ class FarmWorker:
         )
         return result
 
-    async def trigger_mission(self, show_id: str = "show-aethelgard", force_verification_fault: bool = False) -> Dict[str, Any]:
+    async def trigger_mission(
+        self,
+        show_id: str = "show-aethelgard",
+        force_verification_fault: bool = False,
+        trigger_type: str = "api",
+    ) -> Dict[str, Any]:
         """Manually or programmatically triggers a mission run (e.g. from /demo or tests)."""
         if not self.mission_runner:
             raise RuntimeError("Mission runner not configured on worker.")
@@ -290,7 +307,9 @@ class FarmWorker:
             res = await self.mission_runner.execute_mission(
                 show_id=show_id,
                 force_verification_fault=force_verification_fault,
+                trigger_type=trigger_type,
             )
+            self.missions_this_instance += 1
             self.latest_mission = res.model_dump(mode="json")
             return self.latest_mission
         finally:

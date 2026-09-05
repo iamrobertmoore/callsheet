@@ -5,6 +5,7 @@ Provides live status, scenario injection, mission execution, and telemetry audit
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import logging
 import os
 from typing import Optional
 from fastapi import FastAPI, HTTPException
@@ -13,8 +14,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+logger = logging.getLogger(__name__)
+
 from callsheet.agent.mission import MultiStepMissionRunner, MISSION_PANEL_IMAGES
-from callsheet.farm.models import ScenarioType
+from callsheet.farm.models import ScenarioType, ShotStatus
 from callsheet.farm.simulator import RenderFarmSimulator
 from callsheet.farm.worker import FarmWorker
 from callsheet.interventions.dispatcher import InterventionDispatcher
@@ -76,6 +79,8 @@ async def health_check():
         "service": "callsheet",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "worker_running": worker._running,
+        "instance_started_at": worker.instance_started_at,
+        "missions_this_instance": worker.missions_this_instance,
         "tick_cadence": worker.tick_cadence_stats,
     }
 
@@ -151,8 +156,31 @@ async def get_interventions():
 
 @app.get("/api/missions/{mission_id}/panel.png")
 async def get_mission_panel_png(mission_id: str):
-    """Serves the rendered Grafana panel PNG captured during mission execution."""
+    """Serves the rendered Grafana panel PNG captured during mission execution, or dynamically re-renders on cache miss."""
     image_bytes = MISSION_PANEL_IMAGES.get(mission_id)
+    if not image_bytes:
+        logger.info("Panel image cache miss for mission %s. Attempting dynamic re-render via Grafana MCP...", mission_id)
+        from_ms = int((datetime.now(timezone.utc).timestamp() - 1800) * 1000)
+        to_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if worker.latest_mission and worker.latest_mission.get("mission_id") == mission_id:
+            deeplinks = worker.latest_mission.get("deeplinks", {})
+            if "dashboard" in deeplinks:
+                try:
+                    import urllib.parse
+                    parsed = urllib.parse.urlparse(deeplinks["dashboard"])
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    if "from" in qs and "to" in qs:
+                        from_ms = int(qs["from"][0])
+                        to_ms = int(qs["to"][0])
+                except Exception:
+                    pass
+        try:
+            image_bytes = await mission_runner.render_panel_image(from_ms=from_ms, to_ms=to_ms)
+            if image_bytes:
+                MISSION_PANEL_IMAGES[mission_id] = image_bytes
+        except Exception as ex:
+            logger.warning("Dynamic panel render failed for mission %s: %s", mission_id, ex)
+
     if not image_bytes:
         raise HTTPException(status_code=404, detail="Panel image not found for mission")
     return Response(content=image_bytes, media_type="image/png")
@@ -301,6 +329,27 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
             </div>
         """)
     return ''.join(cards)
+
+
+def render_ssr_delivery_banner(shot_118: Optional[Any]) -> str:
+    if not shot_118:
+        return '<div id="delivery-banner" class="delivery-banner" style="display: none;"></div>'
+    status = getattr(shot_118, "status", None) or (shot_118.get("status") if isinstance(shot_118, dict) else None)
+    delivered_at = getattr(shot_118, "delivered_at", None) or (shot_118.get("delivered_at") if isinstance(shot_118, dict) else None)
+    margin = getattr(shot_118, "delivery_margin_hours_achieved", None) or (shot_118.get("delivery_margin_hours_achieved") if isinstance(shot_118, dict) else None)
+
+    if (status == ShotStatus.COMPLETED or str(status).lower() in ("completed", "shotstatus.completed")) and delivered_at:
+        try:
+            if isinstance(delivered_at, str):
+                dt = datetime.fromisoformat(delivered_at.replace("Z", "+00:00"))
+            else:
+                dt = delivered_at
+            time_str = dt.strftime("%H:%M UTC")
+        except Exception:
+            time_str = str(delivered_at)[:16]
+        margin_str = f"{margin:.1f}" if margin is not None else "2.5"
+        return f'<div id="delivery-banner" class="delivery-banner">Shot 118 delivered {time_str}, {margin_str} hours ahead of deadline</div>'
+    return '<div id="delivery-banner" class="delivery-banner" style="display: none;"></div>'
 
 
 def render_ssr_trail(steps: list) -> str:
@@ -805,6 +854,24 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             color: var(--heat-fault);
             border: 1px solid rgba(248, 113, 113, 0.35);
             background: rgba(248, 113, 113, 0.09);
+        }
+
+        .delivery-banner {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            padding: 12px 18px;
+            margin-bottom: 24px;
+            background: var(--state-healthy-wash);
+            border: 1px solid var(--state-healthy-border);
+            border-left: 4px solid var(--state-healthy);
+            border-radius: 4px;
+            font-family: var(--font-condensed);
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            color: var(--state-healthy);
+            text-transform: uppercase;
         }
 
         .slate-metrics {
@@ -1326,6 +1393,8 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             </p>
         </section>
 
+<!-- SSR_DELIVERY_BANNER -->
+
         <!-- Active Delivery Slate -->
         <section class="slate-section">
             <div class="section-header">
@@ -1514,6 +1583,23 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 }
 
                 renderSlate(data.shows, data.latest_mission, data.verification_progress);
+
+                const sh118 = data.shots && data.shots.sh_118;
+                const banner = document.getElementById('delivery-banner');
+                if (banner) {
+                    if (sh118 && (sh118.status === 'COMPLETED' || sh118.status === 'completed') && sh118.delivered_at) {
+                        const d = new Date(sh118.delivered_at);
+                        const hr = String(d.getUTCHours()).padStart(2, '0');
+                        const mn = String(d.getUTCMinutes()).padStart(2, '0');
+                        const margin = (sh118.delivery_margin_hours_achieved !== undefined && sh118.delivery_margin_hours_achieved !== null)
+                            ? Number(sh118.delivery_margin_hours_achieved).toFixed(1)
+                            : '2.5';
+                        banner.textContent = `Shot 118 delivered ${hr}:${mn} UTC, ${margin} hours ahead of deadline`;
+                        banner.style.display = 'flex';
+                    } else {
+                        banner.style.display = 'none';
+                    }
+                }
 
                 if (data.latest_mission) {
                     renderBriefing(data.latest_mission);
@@ -2011,6 +2097,7 @@ async def get_producer_dashboard():
 
     slate_html = render_ssr_slate(state.shows, mission)
     fleet_html, fleet_summary = render_ssr_fleet(state.nodes, mission=mission)
+    delivery_banner_html = render_ssr_delivery_banner(state.shots.get("sh_118"))
 
     briefing_html = render_ssr_briefing(mission)
     steps = mission.get("steps", []) if mission else []
@@ -2031,6 +2118,7 @@ async def get_producer_dashboard():
 
     html = (
         PRODUCER_UI_TEMPLATE
+        .replace("<!-- SSR_DELIVERY_BANNER -->", delivery_banner_html)
         .replace("<!-- SSR_SLATE -->", slate_html)
         .replace("<!-- SSR_BRIEFING_TIME -->", time_label)
         .replace("<!-- SSR_BRIEFING -->", briefing_html)

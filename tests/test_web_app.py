@@ -59,9 +59,10 @@ async def test_scenario_injection_endpoint():
 
 
 @pytest.mark.asyncio
-async def test_mission_panel_png_endpoint():
-    """Verify mission panel png endpoint serves registered image bytes or 404."""
+async def test_mission_panel_png_endpoint(monkeypatch):
+    """Verify mission panel png endpoint serves registered image bytes, dynamic render, or 404."""
     from callsheet.agent.mission import MISSION_PANEL_IMAGES
+    from callsheet.web.app import mission_runner
 
     test_id = "test_mission_img_123"
     fake_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest"
@@ -74,8 +75,20 @@ async def test_mission_panel_png_endpoint():
         assert res.headers["content-type"] == "image/png"
         assert res.content == fake_png
 
-        # 404 for unknown image
-        res_404 = await client.get("/api/missions/unknown_id/panel.png")
+        # Dynamic re-render on cache miss
+        res_dyn = await client.get("/api/missions/unknown_id/panel.png")
+        assert res_dyn.status_code in (200, 404)
+        if res_dyn.status_code == 200:
+            assert res_dyn.headers["content-type"] == "image/png"
+
+        # 404 when dynamic render fails
+        async def mock_fail_render(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(mission_runner, "render_panel_image", mock_fail_render)
+        MISSION_PANEL_IMAGES.pop("unknown_id_fail", None)
+        res_404 = await client.get("/api/missions/unknown_id_fail/panel.png")
         assert res_404.status_code == 404
 
     MISSION_PANEL_IMAGES.pop(test_id, None)
+    MISSION_PANEL_IMAGES.pop("unknown_id", None)

@@ -75,6 +75,7 @@ class MissionResult(BaseModel):
     time_intervention_to_resolved_seconds: Optional[float] = None
     mcp_read_calls: int = 0
     mcp_write_calls: int = 0
+    trigger_type: str = "cycle_boundary"
 
 
 def parse_loki_timestamp(ts_raw: Any) -> Optional[float]:
@@ -220,6 +221,38 @@ class MultiStepMissionRunner:
         logger.info("Farm dashboard not found via search_dashboards, falling back to: %s", fallback)
         return fallback
 
+    async def render_panel_image(
+        self,
+        from_ms: int,
+        to_ms: int,
+        panel_id: int = 1,
+        width: int = 1000,
+        height: int = 500,
+    ) -> Optional[bytes]:
+        """
+        Dynamically renders a panel PNG via Grafana MCP get_panel_image.
+        """
+        try:
+            params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
+            toolset = create_grafana_mcp_toolset(params)
+            dashboard_uid = self.dashboard_uid or await self._discover_dashboard_uid(toolset)
+            img_res = await self._execute_mcp_tool(
+                toolset,
+                "get_panel_image",
+                {
+                    "dashboardUid": dashboard_uid,
+                    "panelId": panel_id,
+                    "width": width,
+                    "height": height,
+                    "timeRange": {"from": str(from_ms), "to": str(to_ms)},
+                },
+            )
+            if isinstance(img_res, dict) and img_res.get("_is_image") and img_res.get("data"):
+                return base64.b64decode(img_res["data"])
+        except Exception as e:
+            logger.warning("render_panel_image failed: %s", e)
+        return None
+
     async def _generate_four_deeplinks(
         self,
         toolset,
@@ -270,7 +303,7 @@ class MultiStepMissionRunner:
                     "queries": [
                         {
                             "refId": "A",
-                            "expr": f'{{deployment_id="{self.deployment_id}", service_name="render-farm", node_id="{chosen_standby_node}"}}',
+                            "expr": f'{{service_name="render-farm"}} | deployment_id="{self.deployment_id}" | node_id="{chosen_standby_node}" |= "rendered on"',
                         }
                     ],
                     "timeRange": {"from": str(from_ms), "to": str(to_ms)},
@@ -328,6 +361,7 @@ class MultiStepMissionRunner:
         force_verification_fault: bool = False,
         poll_interval_seconds: Optional[float] = None,
         max_poll_seconds: Optional[float] = None,
+        trigger_type: str = "cycle_boundary",
     ) -> MissionResult:
         """
         Runs the complete 7-step closed-loop mission strictly driven by Grafana Cloud MCP responses:
@@ -1220,11 +1254,13 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         time_intervention_to_resolved_seconds = None
         if incident_id:
             links_formatted = "\n".join([f"- **{k.upper()}**: {v}" for k, v in deeplinks.items() if v])
+            rate_disp = f"{verified_rate_sec:.1f}s/frame" if verified_rate_sec is not None else "Unverified"
+            temp_disp = f"{verified_temp_c:.1f}C" if verified_temp_c is not None else "Unverified"
             verification_activity = (
                 f"Step 6 Post-Intervention Verification: **{verification_status}**\n\n"
                 f"- Target Node: {chosen_standby_node}\n"
-                f"- Frame Rate: {verified_rate_sec:.1f}s/frame (threshold {rate_limit_seconds:.1f}s)\n"
-                f"- Node Temperature: {verified_temp_c:.1f}C\n"
+                f"- Frame Rate: {rate_disp} (threshold {rate_limit_seconds:.1f}s)\n"
+                f"- Node Temperature: {temp_disp}\n"
                 f"- Witnesses Accepted: {', '.join(witnesses_accepted)}\n\n"
                 f"Absolute Evidence Deeplinks:\n{links_formatted}"
             )
@@ -1240,21 +1276,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             except Exception as e:
                 logger.warning("Failed to add Step 6 verification activity to incident #%s: %s", incident_id, e)
 
-            if verification_status == "VERIFIED_PROTECTED":
-                try:
-                    await self._execute_mcp_tool(
-                        toolset,
-                        "update_incident",
-                        {
-                            "incidentId": incident_id,
-                            "status": "resolved",
-                        },
-                    )
-                    incident_status = "resolved"
-                    time_intervention_to_resolved_seconds = round(time.time() - intervention_epoch, 1)
-                    logger.info("Resolved Grafana IRM incident #%s in %.1fs", incident_id, time_intervention_to_resolved_seconds)
-                except Exception as e:
-                    logger.warning("Failed to resolve Grafana IRM incident #%s: %s", incident_id, e)
+            # Note: Incident resolution is deferred to Step 7 so the briefing note is posted before closure.
 
         step6 = MissionStep(
             step_number=6,
@@ -1375,7 +1397,8 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
         except Exception as e:
             logger.warning("Failed to capture panel image: %s", e)
 
-        # Briefing Activity on Incident
+        # Briefing Activity and Incident Resolution on Incident
+        time_intervention_to_resolved_seconds = None
         if incident_id:
             try:
                 briefing_preview = briefing_text[:600] + ("..." if len(briefing_text) > 600 else "")
@@ -1389,6 +1412,63 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 )
             except Exception as e:
                 logger.warning("Failed to add Step 7 briefing activity to incident #%s: %s", incident_id, e)
+
+            # Resolution summary note and final incident resolution (briefing first, resolve last)
+            if verification_status == "VERIFIED_PROTECTED":
+                summary_line = (
+                    f"Shot {target_shot.shot_code} failed over to {chosen_standby_node}, "
+                    f"verified {verified_rate_sec:.1f}s/frame at {verified_temp_c:.1f}C, "
+                    f"margin +{intervention_record.buffer_margin_hours:.1f}h"
+                )
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "add_activity_to_incident",
+                        {
+                            "incidentId": incident_id,
+                            "body": f"Resolution Summary: {summary_line}",
+                        },
+                    )
+                except Exception as e:
+                    logger.warning("Failed to post resolution summary note to incident #%s: %s", incident_id, e)
+
+                # Also post native incidentSummary via Twirp if reachable
+                try:
+                    import urllib.request
+                    token = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN")
+                    if token and self.grafana_url:
+                        twirp_url = f"{self.grafana_url.rstrip('/')}/api/plugins/grafana-irm-app/resources/api/v1/ActivityService.AddActivity"
+                        twirp_body = json.dumps({
+                            "incidentID": incident_id,
+                            "activityKind": "incidentSummary",
+                            "body": summary_line,
+                        }).encode("utf-8")
+                        twirp_headers = {
+                            "Authorization": f"Bearer {token}",
+                            "X-Grafana-Org-Id": "1",
+                            "Content-Type": "application/json",
+                        }
+                        req = urllib.request.Request(twirp_url, data=twirp_body, headers=twirp_headers, method="POST")
+                        with urllib.request.urlopen(req, timeout=5) as resp:
+                            logger.info("Posted native incidentSummary activity to incident #%s (HTTP %s)", incident_id, resp.status)
+                except Exception as e:
+                    logger.debug("Optional native incidentSummary call skipped: %s", e)
+
+                # Finally resolve incident via update_incident as the last action on the record
+                try:
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "update_incident",
+                        {
+                            "incidentId": incident_id,
+                            "status": "resolved",
+                        },
+                    )
+                    incident_status = "resolved"
+                    time_intervention_to_resolved_seconds = round(time.time() - intervention_epoch, 1)
+                    logger.info("Resolved Grafana IRM incident #%s in %.1fs with summary: %s", incident_id, time_intervention_to_resolved_seconds, summary_line)
+                except Exception as e:
+                    logger.warning("Failed to resolve Grafana IRM incident #%s: %s", incident_id, e)
 
         step7 = MissionStep(
             step_number=7,
@@ -1429,4 +1509,5 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             time_intervention_to_resolved_seconds=time_intervention_to_resolved_seconds,
             mcp_read_calls=self.mcp_read_calls,
             mcp_write_calls=self.mcp_write_calls,
+            trigger_type=trigger_type,
         )

@@ -273,7 +273,11 @@ async def test_post_intervention_verification_escalation_path():
 
         tick_task = asyncio.create_task(bg_ticker())
         try:
-            result = await runner.execute_mission(show_id="show-aethelgard", force_verification_fault=True)
+            result = await runner.execute_mission(
+                show_id="show-aethelgard",
+                force_verification_fault=True,
+                max_poll_seconds=60.0,
+            )
         finally:
             tick_task.cancel()
             await asyncio.gather(tick_task, return_exceptions=True)
