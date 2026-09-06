@@ -4,7 +4,15 @@ set -eo pipefail
 echo "=== Running Callsheet Hygiene Checks ==="
 
 FORBIDDEN_DEPS="strands|boto3|bedrock|anthropic|openai|langchain|crewai|autogen"
-EMPLOYER_HYGIENE="REDACTED|REDACTED|REDACTED"
+
+if [ -n "$HYGIENE_PATTERNS" ]; then
+    EMPLOYER_HYGIENE="$HYGIENE_PATTERNS"
+elif [ -f ".hygiene_patterns" ]; then
+    EMPLOYER_HYGIENE=$(tr -d '\r\n' < .hygiene_patterns)
+else
+    echo "ERROR: Neither HYGIENE_PATTERNS env var nor .hygiene_patterns file is set."
+    exit 1
+fi
 
 FAIL=0
 
