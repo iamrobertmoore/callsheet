@@ -6,7 +6,7 @@ When a render blade degrades in the middle of the night, standard monitoring ale
 
 Without Grafana, Callsheet would be a post-mortem tool that tells you why you missed the deadline after the money is already lost.
 
-Callsheet monitors render operations through Grafana Cloud over the Model Context Protocol (MCP). When hardware degradation threatens an episode delivery, Callsheet acts autonomously. It calculates the delivery margin deficit, isolates the throttled node, reallocates the at-risk shot to an idle standby blade, and interrogates the target node's live telemetry to confirm that render throughput recovered. It then writes a plain-language production briefing that Elena can forward directly to her client.
+Callsheet monitors render operations through Grafana Cloud over the Model Context Protocol (MCP). A Grafana Cloud alerting rule serves as the trigger for autonomous action. When hardware degradation fires an alert, Callsheet investigates metrics, logs, and traces, assesses delivery margin risk, opens an incident in Grafana IRM at Step 4, and begins a dashboard annotation region. It isolates the degraded node and executes workload reallocation under blast-radius policy, holding for producer approval if pre-empting another show under Tier 2. It verifies recovery against live telemetry on the target blade with an automatic rollback path to a secondary standby node if verification fails. Once verified, Callsheet clears the alert, completes the annotation region, drafts an executive briefing for Elena, and marks the incident resolved last.
 
 ## Live Deployment & Dashboards
 
@@ -29,17 +29,19 @@ Callsheet monitors render operations through Grafana Cloud over the Model Contex
           ▼
  [ Callsheet Operations Agent (Google ADK + Vertex AI Gemini) ]
           │
-          ├─► Step 0: Alert Trigger (Grafana Cloud Alerting)        [DETERMINISTIC ALERT]
-          ├─► Step 1: Anomaly Detection (Prometheus Metrics)        [DETERMINISTIC TELEMETRY]
-          ├─► Step 2: Correlation (Loki Logs & Tempo Traces)        [DETERMINISTIC TELEMETRY]
-          ├─► Step 3: Root Cause Isolation (Gemini Synthesis)       [GENERATIVE AI]
-          ├─► Step 4: Production Impact Mapping & SLA Arithmetic    [DETERMINISTIC ARITHMETIC]
-          ├─► Step 5: Workload Reallocation (Blast Radius Policy)   [DETERMINISTIC ACTION]
-          ├─► Step 6: Post-Intervention Verification (Grafana Cloud)[DETERMINISTIC VERIFICATION]
-          └─► Step 7: Producer Callsheet Briefing & Incident Resolve[GENERATIVE + MCP RESOLUTION]
+          ├─► Step 0: Alert Trigger (Grafana Cloud Alerting rule fires)
+          ├─► Step 1: Anomaly Detection (Prometheus node metrics)
+          ├─► Step 2: Telemetry Correlation (Loki logs & Tempo trace spans)
+          ├─► Step 3: Root Cause Isolation (Gemini qualitative synthesis)
+          ├─► Step 4: SLA Arithmetic & Incident Open (IRM incident declared)
+          ├─► Step 5: Workload Reallocation & Annotation (quarantine blade)
+          │         └─► Tier 2 hold if cross-show (producer approval required)
+          ├─► Step 6: Closed-Loop Verification (Prometheus, Loki, Tempo)
+          │         └─► Automatic rollback to node-12 if verification fails
+          └─► Step 7: Annotation Region End, Briefing & Incident Resolved
 ```
 
-Grafana Cloud evaluates the Callsheet rule group once a minute on this stack regardless of the configured 10s interval, setting the observed evaluation scheduler floor to 60s.
+Grafana Cloud evaluates this rule group once a minute on this stack regardless of the configured 10 second interval, so an alert arrives between 0 and 60 seconds after a fault and clears within a minute of quarantine.
 
 ## Architecture and Native Google ADK Integration
 
@@ -49,16 +51,21 @@ Callsheet is built natively on the Google Agent Development Kit (ADK). It uses `
 
 Callsheet queries telemetry and updates Grafana Cloud through these Model Context Protocol tools:
 
-| MCP Tool | Protocol / Transport | Purpose in Callsheet | Cloud Resource Affected |
+| MCP Tool | Access | Step | Cloud Resource / What It Touches |
 | :--- | :--- | :--- | :--- |
-| `list_datasources` | MCP (Streamable HTTP) | Connectivity verification and health check probe | Prometheus, Loki, Tempo instances |
-| `query_prometheus` | MCP (Streamable HTTP) | Step 1 & 6: Node temperatures, clocks, sample timestamps | Prometheus time-series metrics |
-| `query_loki_logs` | MCP (Streamable HTTP) | Step 2 & 6: Frame durations, hardware throttle logs | Loki structured log stream |
-| `grafana_api_request` | MCP (Streamable HTTP) | Step 2 & 6: Tempo trace queries and Alertmanager status | Tempo traces (`/api/search`, `/api/traces`) and Alertmanager |
-| `search_incidents` | MCP (Streamable HTTP) | Step 0: Discovers active Grafana IRM incidents | Grafana Incident Management (IRM) |
-| `create_incident` | MCP (Streamable HTTP) | Step 0: Opens new incident if none exists for firing alert | Grafana Incident Management (IRM) |
-| `update_incident` | MCP (Streamable HTTP) | Step 7: Resolves incident upon verified remediation | Grafana Incident Management (IRM) |
-| `CreateKeyUpdate` | Twirp RPC | Step 5 & 7: Timeline notes and resolution summaries | Grafana IRM incident timeline |
+| `list_datasources` | Read | Setup & Health Check | Discovers Prometheus, Loki, and Tempo datasources; verifies MCP connectivity |
+| `query_prometheus` | Read | Step 1 & Step 6 | Prometheus time-series metrics (node temperatures, clock speeds, sample timestamps) |
+| `query_loki_logs` | Read | Step 2 & Step 6 | Loki structured log stream (frame completion durations, thermal throttle events) |
+| `grafana_api_request` | Read / Write | Step 2, Step 6, Step 7 | Tempo trace spans (`/api/search`, `/api/traces`), Alertmanager rule state, and IRM Twirp key updates |
+| `alerting_manage_rules` | Read / Write | Setup & Step 0 | Grafana Cloud Alerting rules and evaluation state |
+| `search_dashboards` | Read | Setup & Step 7 | Grafana production dashboard discovery and panel UIDs |
+| `generate_deeplink` | Read | Step 7 | Grafana dashboard URL deeplinks for incident timeline and briefing |
+| `create_incident` | Write | Step 4 | Grafana Incident Management (IRM) active incident declaration |
+| `add_activity_to_incident` | Write | Step 4, Step 5, Step 7 | Grafana IRM timeline notes, hold records, and resolution updates |
+| `update_incident` | Write | Step 7 | Grafana IRM incident status (Resolved) and title |
+| `create_annotation` | Write | Step 5 | Grafana dashboard annotation start point marking intervention start |
+| `update_annotation` | Write | Step 7 | Grafana dashboard annotation end point completing remediation region |
+| `get_panel_image` | Read | Step 7 | Grafana dashboard panel PNG rendering for executive briefing |
 
 ## Blast Radius and Authority Policy
 
@@ -74,17 +81,26 @@ A non-negotiable architectural principle in Callsheet is the boundary between de
 
 - Generative models cannot trigger, alter, or approve any operational intervention.
 - Interventions are 100% deterministic: Thermal limits (Step 1) and delivery buffer calculations (Step 4) are evaluated purely with mathematical arithmetic in Python. The workload failover (Step 5) is executed only when code assertions confirm a negative buffer margin and a thermal limit breach.
-- Verification closes the loop: Acting without asking is the harder engineering problem because taking action obliges the agent to prove the action worked. In Step 6, Callsheet re-queries Grafana Cloud telemetry on the standby blade to independently verify nominal frame durations (20 seconds per frame) and stable junction temperatures. If metrics remain degraded, Callsheet disallows the `PROTECTED` status, records the verified fault, and escalates within the producer briefing with diagnostics for technical directors.
-- Generative AI is strictly explanatory: Vertex AI Gemini 3.6 Flash is employed exclusively for qualitative synthesis: Step 3 (deducing root causes from correlated logs and traces) and Step 7 (drafting plain-language correspondence briefings for delivery producers).
+- Verification closes the loop: Acting without asking is the harder engineering problem because taking action obliges the agent to prove the action worked. In Step 6, Callsheet re-queries Grafana Cloud telemetry on the standby blade to independently verify recovery against strict numerical criteria:
+  - Retrieved frame duration must be at or below 1.25 times the stated baseline (<= 25.0s for a 20.0s baseline).
+  - Node temperature must be below 90.0°C.
+  - Telemetry samples must be timestamped after the intervention.
+  - Loki log evidence and Prometheus metric samples are required.
+  - Tempo trace verification is accepted when it arrives within a further 30 seconds.
+  - The verification polling window is bounded at 150 seconds.
+  - If nothing arrives within the window, the verification status is marked inconclusive and escalated.
+  - No synthesised or guessed values are permitted; every number must be retrieved from Grafana Cloud over MCP.
+  If metrics fail verification criteria, Callsheet executes an automatic rollback to secondary standby node-12 or escalates with full diagnostics for technical directors.
+- Generative AI is strictly explanatory: Vertex AI Gemini 3.8 Flash is employed exclusively for qualitative synthesis: Step 3 (deducing root causes from correlated logs and traces) and Step 7 (drafting plain-language correspondence briefings for delivery producers). If Gemini returns nothing, the mission stops and reports; it does not guess.
 
 ## Decision Path Integrity and the Rip-Out Test
 
 Callsheet enforces strict telemetry boundary isolation across its entire decision path:
 
-- No number reaches a decision without a round trip through Grafana Cloud: The Callsheet agent never reads the simulator's internal memory or local state. Every metric sample, log record, and trace duration that drives an intervention decision is retrieved dynamically from Grafana Cloud over the Model Context Protocol.
+- Telemetry vs. Production Metadata: Every telemetry value that drives a decision (temperatures, frame durations, log lines, spans, alert state) comes from Grafana through MCP; production metadata (which shot is on which node, deadlines, frame counts) comes from the farm scheduler, which in a studio would be the render queue manager. The rip-out test covers the telemetry path.
 - The Rip-Out Test: The proof of this isolation is that pointing Callsheet at an unreachable or severed Grafana endpoint causes the mission to fail immediately. The agent contains no mock fallbacks, local memory shortcuts, or side-channel cheats. This failure invariant is asserted in the automated test suite: `tests/test_agent_mission.py::test_mission_fails_when_grafana_unreachable`.
-- What the Farm Is: There is no actual render farm behind this; the machines are simulated. But the metrics, logs, and trace spans they emit are genuine OpenTelemetry sent to a real Grafana Cloud stack via an OTLP gateway, and the agent reads them back the same way it would read real hardware. Callsheet queries that telemetry through MCP exactly as it would against physical on-premise blade servers, cloud instances, or commercial render farm managers.
-- Transition to Physical Infrastructure: To connect Callsheet to physical studio hardware, only the telemetry emitter changes. The agent reasoning loop, MCP tool bindings, deterministic gates, and briefing pipelines remain identical.
+- What the Farm Is: There is no actual render farm behind this; the machines are simulated. But the metrics, logs, and trace spans they emit are genuine OpenTelemetry sent to a real Grafana Cloud stack via an OTLP gateway, and the agent reads them back the same way it would read real hardware. Callsheet queries that telemetry through MCP exactly as it would against physical on-premise blade servers, cloud instances, or a render queue manager.
+- Transition to Physical Infrastructure: The telemetry emitter and the scheduler adapter change, the agent does not.
 - Stated Baseline Render Rate: The baseline render rate (20.0 seconds per frame) is an explicit stated parameter of the simulator representing nominal throughput, rather than a wall-clock measurement subject to vCPU jitter. Downstream contractual buffer arithmetic is derived deterministically from this stated baseline.
 - Telemetry Stream Isolation: Every emitter stamps deployment_id (cloud-run in production, local-<hostname> elsewhere) across metrics, logs, and spans, ensuring agent queries strictly isolate their own streams and prevent test runs from polluting production.
 
@@ -136,26 +152,44 @@ Open `http://localhost:8080` in your browser to view the active Call Sheet dashb
 ## Telemetry Verification and Health Endpoint
 
 The `/api/health` endpoint proves live operational state in a single request with zero secrets:
-- `agent_runtime`: `"live"`
-- `replay_mode`: `false`
+- `status`: Overall service health (`"healthy"` or `"degraded"`)
+- `service`: Service name (`"callsheet"`)
+- `timestamp`: Current UTC timestamp in ISO format
+- `agent_runtime`: `"live"` (live agent loop, not a playback)
+- `replay_mode`: `false` (all actions run against live backends)
 - `mcp_server`: `"grafana/mcp-grafana v1.2.0, self-hosted sidecar"`
 - `mcp_transport`: `"streamable-http"`
-- `mcp_reachable`: Evaluated live at request time via `list_datasources` tool execution.
+- `mcp_reachable`: Evaluated live at request time via `list_datasources` tool probe
 - `grafana_stack`: `"bigforest2172"`
-- `alert_rule_uid`: `"cfxbt56wwbocge"`
-- `alert_rule_state`: Current ruler state (`"Firing"`, `"Normal"`)
+- `alert_rule_uid`: `"cfxbt56wwbocge"` (registered alert rule in Grafana Cloud)
+- `alert_rule_state`: Current evaluation state in Grafana Cloud Alertmanager (`"Normal"`, `"Firing"`)
 - `alert_rule_interval_configured`: `"10s"`
 - `alert_rule_interval_observed`: `"60s"` (Grafana Cloud scheduler floor)
 - `model`: `"gemini-3.8-flash"`
 - `model_location`: `"global"`
-- `pending_approvals`: Current list of Tier 2 actions held for producer review.
+- `last_mission_at`: UTC timestamp of the most recent mission completion
+- `last_mission_trigger`: Trigger source of the latest mission (e.g. `"autonomous_watchdog"`, `"manual_injection"`)
+- `last_verification_status`: Status of the last verification attempt (`"VERIFIED_PROTECTED"`, `"ROLLBACK_PROTECTED"`, `"VERIFICATION_INCONCLUSIVE"`, `"ESCALATED"`)
+- `cycle_epoch`: Current 6-hour cycle epoch start timestamp
+- `next_reset_at_utc`: Next scheduled cycle reset timestamp
+- `pending_approvals`: Current list of Tier 2 actions held for producer review
+- `worker_running`: Background loop execution status
+- `instance_started_at`: UTC timestamp when this Cloud Run container instance booted
+- `missions_this_instance`: Total missions completed by this container instance
+- `deployment_id`: Emitter telemetry partition tag (`"cloud-run"`)
+- `alert_rule_status`: Alert rule polling status (`"ok"`)
+- `alert_rule_error`: Alert polling error description if any
+- `scenario_primed_by`: Origin of active scenario baseline (`"instance_start"`, `"cycle_reset"`, `"manual_injection"`)
+- `tick_cadence`: Live statistics for the 5-second watchdog loop ticks and latency
+- `watchdog_stalled`: Boolean flag indicating if an alert has been unserviced for >180 seconds
+- `watchdog_stalled_since`: UTC timestamp when the stall condition was first flagged
 
 See [LIMITATIONS.md](LIMITATIONS.md) for full operational constraints, simulator architecture details, and Gemini boundaries.
 
 ## Technologies Used
 
 - **Google Agent Development Kit (ADK)**: Built natively on the ADK using `google.adk.tools.mcp_tool.McpToolset` and `StreamableHTTPConnectionParams` to manage Model Context Protocol tool lifecycle and streaming HTTP connections to Grafana Cloud.
-- **Vertex AI Gemini**: Gemini 3.6 Flash (`google-genai`) accessed via the global endpoint (`location="global"`), avoiding regional endpoint 404 errors observed during development.
+- **Vertex AI Gemini**: Gemini 3.8 Flash (`google-genai`) accessed via the global endpoint (`location="global"`), avoiding regional endpoint 404 errors observed during development.
 - **Grafana Stack**: Grafana Cloud, `grafana/mcp-grafana` MCP Server, Prometheus metrics, Loki logs, and OpenTelemetry ingestion (Tempo traces).
 - **Google Cloud Platform**: Cloud Run deployed with instance-based billing and dedicated CPU allocation (addressing request-based billing constraints where "CPU is only allocated during request processing" and idle instances can shut down at any time) and Cloud Build.
 - **Python Runtime**: Python 3.12, FastAPI, asyncio background workers, and OpenTelemetry instrumentation SDKs.
@@ -163,4 +197,3 @@ See [LIMITATIONS.md](LIMITATIONS.md) for full operational constraints, simulator
 ## License
 
 This project is licensed under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
-

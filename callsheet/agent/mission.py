@@ -2188,45 +2188,52 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 except Exception as e:
                     logger.warning("Failed to post resolution summary note to incident #%s: %s", incident_id, e)
 
-                # Native Grafana IRM incident summary registration via Twirp
+                # Native Grafana IRM incident summary registration via MCP grafana_api_request tool
                 try:
-                    token = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN")
-                    if token and self.grafana_url:
-                        twirp_headers = {
-                            "Authorization": f"Bearer {token}",
-                            "X-Grafana-Org-Id": "1",
-                            "Content-Type": "application/json",
-                        }
-                        # 1. KeyUpdatesService.CreateKeyUpdate (renders in incident header/summary card while active)
-                        try:
-                            key_url = f"{self.grafana_url.rstrip('/')}/api/plugins/grafana-irm-app/resources/api/v1/KeyUpdatesService.CreateKeyUpdate"
-                            key_body = json.dumps({
-                                "incidentID": str(incident_id),
-                                "title": "Resolution Summary",
-                                "content": summary_line,
-                                "contentType": "text/plain",
-                                "statusID": "",
-                                "severityID": "",
-                                "scope": "public",
-                            }).encode("utf-8")
-                            req_k = urllib.request.Request(key_url, data=key_body, headers=twirp_headers, method="POST")
-                            with urllib.request.urlopen(req_k, timeout=5) as resp_k:
-                                logger.info("Posted native KeyUpdate summary to incident #%s (HTTP %s)", incident_id, resp_k.status)
-                        except Exception as ex_k:
-                            logger.debug("Optional KeyUpdate call skipped: %s", ex_k)
+                    # 1. KeyUpdatesService.CreateKeyUpdate (renders in incident header/summary card while active)
+                    key_body = {
+                        "incidentID": str(incident_id),
+                        "title": "Resolution Summary",
+                        "content": summary_line,
+                        "contentType": "text/plain",
+                        "statusID": "",
+                        "severityID": "",
+                        "scope": "public",
+                    }
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "grafana_api_request",
+                        {
+                            "endpoint": "/api/plugins/grafana-irm-app/resources/api/v1/KeyUpdatesService.CreateKeyUpdate",
+                            "method": "POST",
+                            "body": json.dumps(key_body),
+                            "headers": {"Content-Type": "application/json", "X-Grafana-Org-Id": "1"},
+                        },
+                    )
+                    logger.info("Posted KeyUpdate summary to incident #%s via MCP", incident_id)
+                except Exception as ex_k:
+                    logger.debug("Optional KeyUpdate via MCP skipped: %s", ex_k)
 
-                        # 2. ActivityService.AddActivity with activityKind="incidentSummary"
-                        twirp_url = f"{self.grafana_url.rstrip('/')}/api/plugins/grafana-irm-app/resources/api/v1/ActivityService.AddActivity"
-                        twirp_body = json.dumps({
-                            "incidentID": str(incident_id),
-                            "activityKind": "incidentSummary",
-                            "body": summary_line,
-                        }).encode("utf-8")
-                        req = urllib.request.Request(twirp_url, data=twirp_body, headers=twirp_headers, method="POST")
-                        with urllib.request.urlopen(req, timeout=5) as resp:
-                            logger.info("Posted native incidentSummary activity to incident #%s (HTTP %s)", incident_id, resp.status)
-                except Exception as e:
-                    logger.debug("Optional native incidentSummary call skipped: %s", e)
+                try:
+                    # 2. ActivityService.AddActivity with activityKind="incidentSummary"
+                    act_body = {
+                        "incidentID": str(incident_id),
+                        "activityKind": "incidentSummary",
+                        "body": summary_line,
+                    }
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "grafana_api_request",
+                        {
+                            "endpoint": "/api/plugins/grafana-irm-app/resources/api/v1/ActivityService.AddActivity",
+                            "method": "POST",
+                            "body": json.dumps(act_body),
+                            "headers": {"Content-Type": "application/json", "X-Grafana-Org-Id": "1"},
+                        },
+                    )
+                    logger.info("Posted incidentSummary activity to incident #%s via MCP", incident_id)
+                except Exception as ex_a:
+                    logger.debug("Optional ActivityService via MCP skipped: %s", ex_a)
 
                 # Finally resolve incident once, LAST
                 try:
@@ -2582,45 +2589,52 @@ Strict rules: No em dashes anywhere, use colons, parentheses, or periods. No cor
                 except Exception as ex:
                     logger.warning("Failed to post resolution summary note: %s", ex)
 
-                # Native Grafana IRM incident summary registration via Twirp
+                # Native Grafana IRM incident summary registration via MCP grafana_api_request tool
                 try:
-                    token = os.environ.get("GRAFANA_SERVICE_ACCOUNT_TOKEN")
-                    if token and self.grafana_url:
-                        twirp_headers = {
-                            "Authorization": f"Bearer {token}",
-                            "X-Grafana-Org-Id": "1",
-                            "Content-Type": "application/json",
-                        }
-                        # 1. KeyUpdatesService.CreateKeyUpdate (renders in incident header/summary card while active)
-                        try:
-                            key_url = f"{self.grafana_url.rstrip('/')}/api/plugins/grafana-irm-app/resources/api/v1/KeyUpdatesService.CreateKeyUpdate"
-                            key_body = json.dumps({
-                                "incidentID": str(approval.incident_id),
-                                "title": "Resolution Summary",
-                                "content": summary_line,
-                                "contentType": "text/plain",
-                                "statusID": "",
-                                "severityID": "",
-                                "scope": "public",
-                            }).encode("utf-8")
-                            req_k = urllib.request.Request(key_url, data=key_body, headers=twirp_headers, method="POST")
-                            with urllib.request.urlopen(req_k, timeout=5) as resp_k:
-                                logger.info("Posted native KeyUpdate summary to incident #%s (HTTP %s)", approval.incident_id, resp_k.status)
-                        except Exception as ex_k:
-                            logger.debug("Optional KeyUpdate summary skipped: %s", ex_k)
+                    # 1. KeyUpdatesService.CreateKeyUpdate (renders in incident header/summary card while active)
+                    key_body = {
+                        "incidentID": str(approval.incident_id),
+                        "title": "Resolution Summary",
+                        "content": summary_line,
+                        "contentType": "text/plain",
+                        "statusID": "",
+                        "severityID": "",
+                        "scope": "public",
+                    }
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "grafana_api_request",
+                        {
+                            "endpoint": "/api/plugins/grafana-irm-app/resources/api/v1/KeyUpdatesService.CreateKeyUpdate",
+                            "method": "POST",
+                            "body": json.dumps(key_body),
+                            "headers": {"Content-Type": "application/json", "X-Grafana-Org-Id": "1"},
+                        },
+                    )
+                    logger.info("Posted KeyUpdate summary to incident #%s via MCP", approval.incident_id)
+                except Exception as ex_k:
+                    logger.debug("Optional KeyUpdate summary via MCP skipped: %s", ex_k)
 
-                        # 2. ActivityService.AddActivity with activityKind="incidentSummary"
-                        twirp_url = f"{self.grafana_url.rstrip('/')}/api/plugins/grafana-irm-app/resources/api/v1/ActivityService.AddActivity"
-                        twirp_body = json.dumps({
-                            "incidentID": str(approval.incident_id),
-                            "activityKind": "incidentSummary",
-                            "body": summary_line,
-                        }).encode("utf-8")
-                        req = urllib.request.Request(twirp_url, data=twirp_body, headers=twirp_headers, method="POST")
-                        with urllib.request.urlopen(req, timeout=5) as resp:
-                            logger.info("Posted native incidentSummary for approval: HTTP %s", resp.status)
-                except Exception as ex:
-                    logger.debug("Twirp call skipped: %s", ex)
+                try:
+                    # 2. ActivityService.AddActivity with activityKind="incidentSummary"
+                    act_body = {
+                        "incidentID": str(approval.incident_id),
+                        "activityKind": "incidentSummary",
+                        "body": summary_line,
+                    }
+                    await self._execute_mcp_tool(
+                        toolset,
+                        "grafana_api_request",
+                        {
+                            "endpoint": "/api/plugins/grafana-irm-app/resources/api/v1/ActivityService.AddActivity",
+                            "method": "POST",
+                            "body": json.dumps(act_body),
+                            "headers": {"Content-Type": "application/json", "X-Grafana-Org-Id": "1"},
+                        },
+                    )
+                    logger.info("Posted incidentSummary activity to incident #%s via MCP", approval.incident_id)
+                except Exception as ex_a:
+                    logger.debug("Optional ActivityService via MCP skipped: %s", ex_a)
 
                 # 10. FINALLY resolve the incident once, LAST
                 try:

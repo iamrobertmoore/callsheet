@@ -88,6 +88,16 @@ else
     echo "PASS: No em-dashes found in project source code or documentation."
 fi
 
+echo "Check 5: No direct HTTP calls (urllib.request, requests, httpx) in callsheet/..."
+DIRECT_HTTP_MATCHES=$(git grep -iE "(urllib\.request|import requests|from requests|requests\.(get|post|put|patch|delete|request)|import httpx|from httpx|httpx\.(get|post|put|patch|delete|AsyncClient|Client))" -- 'callsheet/*' || true)
+if [ -n "$DIRECT_HTTP_MATCHES" ]; then
+    echo "ERROR: Found direct HTTP calls in callsheet/ bypassing MCP:"
+    echo "$DIRECT_HTTP_MATCHES"
+    FAIL=1
+else
+    echo "PASS: No direct HTTP calls found in callsheet/ (strictly MCP)."
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     echo "=== HYGIENE CHECKS FAILED ==="
     exit 1
