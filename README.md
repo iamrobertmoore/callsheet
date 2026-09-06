@@ -43,7 +43,7 @@ Callsheet monitors render operations through Grafana Cloud over the Model Contex
 
 Grafana Cloud evaluates this rule group once a minute on this stack regardless of the configured 10 second interval, so an alert arrives between 0 and 60 seconds after a fault and clears within a minute of quarantine.
 
-## Architecture and Native Google ADK Integration
+## Google ADK Integration
 
 Callsheet is built natively on the Google Agent Development Kit (ADK). It uses `google.adk.tools.mcp_tool.McpToolset` with `StreamableHTTPConnectionParams` to manage Model Context Protocol tool lifecycle, streaming HTTP connections, and dynamic schema binding directly to the Grafana Cloud MCP server.
 
@@ -56,10 +56,10 @@ Callsheet queries telemetry and updates Grafana Cloud through these Model Contex
 | `list_datasources` | Read | Setup & Health Check | Discovers Prometheus, Loki, and Tempo datasources; verifies MCP connectivity |
 | `query_prometheus` | Read | Step 1 & Step 6 | Prometheus time-series metrics (node temperatures, clock speeds, sample timestamps) |
 | `query_loki_logs` | Read | Step 2 & Step 6 | Loki structured log stream (frame completion durations, thermal throttle events) |
-| `grafana_api_request` | Read / Write | Step 2, Step 6, Step 7 | Tempo trace spans (`/api/search`, `/api/traces`), Alertmanager rule state, and IRM Twirp key updates |
-| `alerting_manage_rules` | Read / Write | Setup & Step 0 | Grafana Cloud Alerting rules and evaluation state |
+| `grafana_api_request` | Read / Write | Step 2, Step 6, Step 7 | Tempo trace spans (`/api/search`, `/api/traces`), alert rule state, and IRM Twirp key updates |
+| `alerting_manage_rules` | Read at step 0, Write at setup | Step 0 (and setup) | Grafana Alerting rules and evaluation state |
 | `search_dashboards` | Read | Setup & Step 7 | Grafana production dashboard discovery and panel UIDs |
-| `generate_deeplink` | Read | Step 7 | Grafana dashboard URL deeplinks for incident timeline and briefing |
+| `generate_deeplink` | Read | Step 6 | Grafana dashboard URL deeplinks for verification evidence and incident timeline |
 | `create_incident` | Write | Step 4 | Grafana Incident Management (IRM) active incident declaration |
 | `add_activity_to_incident` | Write | Step 4, Step 5, Step 7 | Grafana IRM timeline notes, hold records, and resolution updates |
 | `update_incident` | Write | Step 7 | Grafana IRM incident status (Resolved) and title |
@@ -162,27 +162,27 @@ The `/api/health` endpoint proves live operational state in a single request wit
 - `mcp_reachable`: Evaluated live at request time via `list_datasources` tool probe
 - `grafana_stack`: `"bigforest2172"`
 - `alert_rule_uid`: `"cfxbt56wwbocge"` (registered alert rule in Grafana Cloud)
-- `alert_rule_state`: Current evaluation state in Grafana Cloud Alertmanager (`"Normal"`, `"Firing"`)
+- `alert_rule_state`: Current evaluation state in Grafana Alerting (lowercase `"normal"` or `"firing"`)
 - `alert_rule_interval_configured`: `"10s"`
 - `alert_rule_interval_observed`: `"60s"` (Grafana Cloud scheduler floor)
 - `model`: `"gemini-3.8-flash"`
 - `model_location`: `"global"`
-- `last_mission_at`: UTC timestamp of the most recent mission completion
-- `last_mission_trigger`: Trigger source of the latest mission (e.g. `"autonomous_watchdog"`, `"manual_injection"`)
-- `last_verification_status`: Status of the last verification attempt (`"VERIFIED_PROTECTED"`, `"ROLLBACK_PROTECTED"`, `"VERIFICATION_INCONCLUSIVE"`, `"ESCALATED"`)
-- `cycle_epoch`: Current 6-hour cycle epoch start timestamp
-- `next_reset_at_utc`: Next scheduled cycle reset timestamp
+- `last_mission_at`: UTC timestamp of the most recent mission completion, or `null`
+- `last_mission_trigger`: Trigger source of the latest mission (`"grafana_alert"` or `"api"`, or `null`)
+- `last_verification_status`: Status of the last verification attempt (`"VERIFIED_PROTECTED"`, `"PENDING_APPROVAL"`, `"ESCALATED"`, `"VERIFICATION_INCONCLUSIVE"`, or `null`)
+- `cycle_epoch`: Integer 6-hour cycle epoch index (e.g. `82809`)
+- `next_reset_at_utc`: Next scheduled cycle reset timestamp in ISO format
 - `pending_approvals`: Current list of Tier 2 actions held for producer review
-- `worker_running`: Background loop execution status
+- `worker_running`: Background loop execution status (`true` / `false`)
 - `instance_started_at`: UTC timestamp when this Cloud Run container instance booted
 - `missions_this_instance`: Total missions completed by this container instance
 - `deployment_id`: Emitter telemetry partition tag (`"cloud-run"`)
 - `alert_rule_status`: Alert rule polling status (`"ok"`)
-- `alert_rule_error`: Alert polling error description if any
-- `scenario_primed_by`: Origin of active scenario baseline (`"instance_start"`, `"cycle_reset"`, `"manual_injection"`)
+- `alert_rule_error`: Alert polling error description if any, or `null`
+- `scenario_primed_by`: Origin of active scenario baseline (`"instance_start"`, `"cycle_boundary"`, `"demo"`, or `"api"`)
 - `tick_cadence`: Live statistics for the 5-second watchdog loop ticks and latency
 - `watchdog_stalled`: Boolean flag indicating if an alert has been unserviced for >180 seconds
-- `watchdog_stalled_since`: UTC timestamp when the stall condition was first flagged
+- `watchdog_stalled_since`: UTC timestamp when the stall condition was first flagged, or `null`
 
 See [LIMITATIONS.md](LIMITATIONS.md) for full operational constraints, simulator architecture details, and Gemini boundaries.
 

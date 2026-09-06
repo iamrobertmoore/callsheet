@@ -31,27 +31,27 @@ curl -s https://callsheet-746874807798.us-central1.run.app/api/health | jq .
 - `mcp_reachable`: `true` (verified live on-demand via an active `list_datasources` probe)
 - `grafana_stack`: `"bigforest2172"`
 - `alert_rule_uid`: `"cfxbt56wwbocge"` (active alert rule registered in Grafana Cloud)
-- `alert_rule_state`: Current evaluation state in Grafana Cloud Alertmanager (`"Normal"`, `"Firing"`)
+- `alert_rule_state`: Current evaluation state in Grafana Alerting (lowercase `"normal"` or `"firing"`)
 - `alert_rule_interval_configured`: `"10s"`
 - `alert_rule_interval_observed`: `"60s"` (Grafana Cloud multi-tenant evaluation scheduler floor)
 - `model`: `"gemini-3.8-flash"` (Vertex AI model accessed via global endpoint)
 - `model_location`: `"global"`
-- `last_mission_at`: UTC timestamp of the most recent mission completion
-- `last_mission_trigger`: Trigger source of the latest mission
-- `last_verification_status`: Status of the last verification attempt
-- `cycle_epoch`: Current 6-hour cycle epoch start timestamp
-- `next_reset_at_utc`: Next scheduled cycle reset timestamp
+- `last_mission_at`: UTC timestamp of the most recent mission completion, or `null`
+- `last_mission_trigger`: Trigger source of the latest mission (`"grafana_alert"` or `"api"`, or `null`)
+- `last_verification_status`: Status of the last verification attempt (`"VERIFIED_PROTECTED"`, `"PENDING_APPROVAL"`, `"ESCALATED"`, `"VERIFICATION_INCONCLUSIVE"`, or `null`)
+- `cycle_epoch`: Integer 6-hour cycle epoch index (e.g. `82809`)
+- `next_reset_at_utc`: Next scheduled cycle reset timestamp in ISO format
 - `pending_approvals`: Current list of Tier 2 actions held for producer review
-- `worker_running`: Background loop execution status
+- `worker_running`: Background loop execution status (`true` / `false`)
 - `instance_started_at`: UTC timestamp when this Cloud Run container instance booted
 - `missions_this_instance`: Total missions completed by this container instance
 - `deployment_id`: `"cloud-run"` (guarantees metric, log, and trace isolation)
 - `alert_rule_status`: Alert rule polling status (`"ok"`)
-- `alert_rule_error`: Alert polling error description if any
-- `scenario_primed_by`: Origin of active scenario baseline (`"instance_start"`, `"cycle_reset"`, `"manual_injection"`)
+- `alert_rule_error`: Alert polling error description if any, or `null`
+- `scenario_primed_by`: Origin of active scenario baseline (`"instance_start"`, `"cycle_boundary"`, `"demo"`, or `"api"`)
 - `tick_cadence`: Live statistics for the 5-second watchdog loop ticks and latency
 - `watchdog_stalled`: Boolean flag indicating if an alert has been unserviced for >180 seconds
-- `watchdog_stalled_since`: UTC timestamp when the stall condition was first flagged
+- `watchdog_stalled_since`: UTC timestamp when the stall condition was first flagged, or `null`
 
 ---
 
@@ -66,9 +66,8 @@ Open these two tabs side-by-side:
    - Executive briefing with client-ready communication notes and audit trail.
 
 2. **Public Grafana Control Tower**: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd)
-   - Live Prometheus node temperatures, clock frequencies, and frame render rates.
-   - Loki structured log streams showing frame start, render pass, and completion events.
-   - Tempo distributed traces measuring raytracing and volumetrics render stages.
+   - Real-time Prometheus node temperatures across all cluster blades with thermal limit threshold line.
+   - Live frame render durations measuring nominal throughput (20.0s) and throttling spikes.
 
 ---
 
@@ -77,7 +76,7 @@ Open these two tabs side-by-side:
 When left running unattended, Callsheet operates continuously without human intervention:
 
 1. **Watchdog Evaluation**: Callsheet reads the alert rule state through MCP on every five second tick.
-2. **Alert Trigger (Step 0)**: When a hardware fault occurs, Grafana Cloud Alertmanager evaluates on its 60s floor and fires alert `cfxbt56wwbocge`.
+2. **Alert Trigger (Step 0)**: When a hardware fault occurs, Grafana Alerting evaluates on its 60s floor and fires alert `cfxbt56wwbocge`.
 3. **Investigation & Correlation (Steps 1 to 3)**: Callsheet queries Prometheus metrics, Loki logs, and Tempo traces via MCP. Gemini 3.8 Flash deduces the root cause (e.g. thermal junction limit breach on node-07).
 4. **SLA Buffer Arithmetic & Incident Declaration (Step 4)**: Calculates delivery margin impact deterministically in Python (`(deadline - now) - remaining_work`) and declares an incident in Grafana IRM.
 5. **Tier 1 Autonomous Failover (Step 5)**: Quarantines failing node-07, opens an annotation region, and reallocates shot 118 to idle standby node-11.
@@ -95,10 +94,10 @@ Callsheet interacts with Grafana Cloud strictly through the Model Context Protoc
 | `list_datasources` | Read | Setup & Health Check | Discovers Prometheus, Loki, and Tempo datasources; verifies MCP connectivity |
 | `query_prometheus` | Read | Step 1 & Step 6 | Prometheus time-series metrics (node temperatures, clock speeds, sample timestamps) |
 | `query_loki_logs` | Read | Step 2 & Step 6 | Loki structured log stream (frame completion durations, thermal throttle events) |
-| `grafana_api_request` | Read / Write | Step 2, Step 6, Step 7 | Tempo trace spans (`/api/search`, `/api/traces`), Alertmanager rule state, and IRM Twirp key updates |
-| `alerting_manage_rules` | Read / Write | Setup & Step 0 | Grafana Cloud Alerting rules and evaluation state |
+| `grafana_api_request` | Read / Write | Step 2, Step 6, Step 7 | Tempo trace spans (`/api/search`, `/api/traces`), alert rule state, and IRM Twirp key updates |
+| `alerting_manage_rules` | Read at step 0, Write at setup | Step 0 (and setup) | Grafana Alerting rules and evaluation state |
 | `search_dashboards` | Read | Setup & Step 7 | Grafana production dashboard discovery and panel UIDs |
-| `generate_deeplink` | Read | Step 7 | Grafana dashboard URL deeplinks for incident timeline and briefing |
+| `generate_deeplink` | Read | Step 6 | Grafana dashboard URL deeplinks for verification evidence and incident timeline |
 | `create_incident` | Write | Step 4 | Grafana Incident Management (IRM) active incident declaration |
 | `add_activity_to_incident` | Write | Step 4, Step 5, Step 7 | Grafana IRM timeline notes, hold records, and resolution updates |
 | `update_incident` | Write | Step 7 | Grafana IRM incident status (Resolved) and title |
@@ -117,12 +116,12 @@ Open [https://callsheet-746874807798.us-central1.run.app/demo](https://callsheet
 - **Measured Timings**: Alert arrives within 60 seconds, verification takes about 50 seconds after the move, alert clears within a minute, incident resolved about 100 to 150 seconds after the fault.
 - **What to Observe**:
   1. Click the button. Node-07 begins thermal throttling in Prometheus (temperature rises to 95.9C, frame render duration slows to 120.0s).
-  2. Within 60 seconds, Grafana Cloud Alertmanager fires alert `cfxbt56wwbocge`.
+  2. Within 60 seconds, Grafana Alerting fires alert `cfxbt56wwbocge`.
   3. The supervisor strip on `/` switches to `INVESTIGATING ANOMALY (MCP)`.
   4. Callsheet inspects metrics, logs, and traces. At Step 4, it declares an incident in Grafana IRM. At Step 5, it quarantines failing node-07, opens an annotation region, and reallocates shot 118 to standby node-11.
   5. The supervisor strip switches to `[Tier 1 Attempt 1] Awaiting frame on node-11. Verification window 150s, <N>s elapsed.` and the slate badge displays `VERIFYING (<N>s)`.
   6. Verification completes about 50 seconds after the move: node-11 emits a post-intervention frame in Loki (20.0s) and Prometheus confirms nominal temperature (62.0C), transitioning the slate badge to `VERIFIED PROTECTED`.
-  7. Node-07 remains quarantined. The alert clears in Grafana Alertmanager within a minute of quarantine, Callsheet completes the annotation region, drafts an executive briefing, and marks the incident Resolved (about 100 to 150 seconds after the fault).
+  7. Node-07 remains quarantined. The alert rule clears in Grafana Alerting within a minute of quarantine, Callsheet completes the annotation region, drafts an executive briefing, and marks the incident Resolved (about 100 to 150 seconds after the fault).
 
 ### Scenario 2: Double Fault (Tier 2 Hold & Producer Approval Card)
 - **Button**: `Double fault, holds for your approval after about two minutes`
@@ -140,7 +139,7 @@ Open [https://callsheet-746874807798.us-central1.run.app/demo](https://callsheet
      - Action: Pre-empt blade node-08 from Abyssal Trench for shot 204.
   8. Click **Approve Reallocation**:
      - Callsheet resumes execution, pre-empts blade node-08 for shot 204, and verifies post-intervention telemetry (taking about a further 90 seconds).
-     - Node-03 is quarantined, Grafana alert clears, briefing is generated, and the incident is marked Resolved.
+     - Node-03 is quarantined, the alert rule clears in Grafana Alerting, briefing is generated, and the incident is marked Resolved.
   9. (Alternative) Click **Decline & Escalate**:
      - Node-03 is quarantined anyway, shot 204 goes back to the queue, *Solar Flare: Redux* stays `AT RISK`, and the incident stays active with an emergency escalation briefing recorded.
 
@@ -154,7 +153,7 @@ Open [https://callsheet-746874807798.us-central1.run.app/demo](https://callsheet
   4. Callsheet immediately quarantines node-11, rejects the attempt, and executes an automatic rollback to secondary standby blade node-12.
   5. The supervisor strip switches to `[Tier 1 Attempt 2 - Rollback] Awaiting frame on node-12. Verification window 150s, <N>s elapsed.`.
   6. Verification polls node-12, confirms nominal 20.0s frame rate and 62.0C temperature, transitioning the slate badge to `VERIFIED PROTECTED`.
-  7. Alert clears in Grafana Alertmanager, briefing documents the failed attempt on node-11 and successful recovery on node-12, and the incident is resolved.
+  7. The alert rule clears in Grafana Alerting, briefing documents the failed attempt on node-11 and successful recovery on node-12, and the incident is resolved.
 
 ---
 
