@@ -167,6 +167,8 @@ async def health_check():
         "alert_rule_error": worker.alert_rule_error,
         "scenario_primed_by": worker.scenario_primed_by,
         "tick_cadence": worker.tick_cadence_stats,
+        "watchdog_stalled": worker.watchdog_stalled,
+        "watchdog_stalled_since": worker.watchdog_stalled_since,
     }
     if mcp_error:
         data["mcp_error"] = mcp_error
@@ -263,6 +265,8 @@ async def get_farm_state():
         "pending_approvals": serialize_approvals(),
         "cycle_epoch": worker.current_cycle_epoch,
         "next_reset_at_utc": worker.next_reset_at_utc,
+        "watchdog_stalled": worker.watchdog_stalled,
+        "watchdog_stalled_since": worker.watchdog_stalled_since,
     }
     return JSONResponse(
         content=content,
@@ -1971,7 +1975,9 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
                 const statusText = document.getElementById('agent-status-text');
                 const hasPendingHold = data.pending_approvals && data.pending_approvals.some(a => a.status === 'PENDING');
-                if (hasPendingHold) {
+                if (data.watchdog_stalled) {
+                    statusText.innerHTML = '<span class="status-pip" style="color: var(--state-critical);"></span> Agent stalled, check health';
+                } else if (hasPendingHold) {
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> Tier 2 hold: awaiting producer approval';
                 } else if (data.verification_progress && data.verification_progress.active) {
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> ' + data.verification_progress.message;
@@ -2765,7 +2771,9 @@ async def get_producer_dashboard():
         approval_cards_html = ""
 
     has_pending_hold = bool(pending_approvals)
-    if has_pending_hold:
+    if worker.watchdog_stalled:
+        status_text_html = '<span class="status-pip" style="color: var(--state-critical);"></span> Agent stalled, check health'
+    elif has_pending_hold:
         status_text_html = '<span class="status-pip" style="color: var(--heat-warm);"></span> Tier 2 hold: awaiting producer approval'
     elif worker.verification_progress and worker.verification_progress.get("active"):
         status_text_html = f'<span class="status-pip" style="color: var(--heat-warm);"></span> {worker.verification_progress.get("message")}'

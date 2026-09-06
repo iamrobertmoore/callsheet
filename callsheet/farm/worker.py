@@ -134,6 +134,11 @@ class FarmWorker:
         self.last_mission_trigger: Optional[str] = None
         self.last_verification_status: Optional[str] = None
 
+        # Stall detector tracking
+        self.watchdog_stalled: bool = False
+        self.watchdog_stalled_since: Optional[str] = None
+        self._over_limit_detected_at: Optional[float] = None
+
     @property
     def current_cycle_epoch(self) -> int:
         now_ts = int(time.time())
@@ -259,6 +264,9 @@ class FarmWorker:
                     self.fault_injected_at = time.time()
                     self.alert_firing_observed_at = None
                     self.mission_started_at = None
+                    self._over_limit_detected_at = None
+                    self.watchdog_stalled = False
+                    self.watchdog_stalled_since = None
                     self.simulator.reset_cycle()
                     self.simulator.inject_scenario(ScenarioType.THERMAL_THROTTLING)
                     PENDING_APPROVALS.clear()
@@ -276,6 +284,33 @@ class FarmWorker:
 
                 # 4. Autonomous Agent Watchdog: Check Grafana alert state and trigger intervention
                 await self._check_and_trigger_autonomous_mission()
+
+                # 5. Stall detector: check if any node has been over limit with a shot for > 180s without a mission starting
+                over_limit_nodes = [
+                    n for n in self.simulator.state.nodes.values()
+                    if (n.temperature_celsius >= n.thermal_limit_celsius or n.status == NodeStatus.THROTTLED)
+                    and bool(n.current_shot_id)
+                ]
+                if over_limit_nodes and not self.is_investigating and self._mission_task is None:
+                    if self._over_limit_detected_at is None:
+                        self._over_limit_detected_at = time.time()
+                    elapsed_over_limit = time.time() - self._over_limit_detected_at
+                    if elapsed_over_limit > 180.0:
+                        if not self.watchdog_stalled:
+                            node_ids = [n.id for n in over_limit_nodes]
+                            logger.error(
+                                "Watchdog stall detected: nodes %s have been over thermal limit with shots allocated for %.1fs without a mission starting",
+                                node_ids,
+                                elapsed_over_limit,
+                            )
+                            self.watchdog_stalled = True
+                            self.watchdog_stalled_since = datetime.fromtimestamp(
+                                self._over_limit_detected_at, tz=timezone.utc
+                            ).isoformat()
+                else:
+                    self._over_limit_detected_at = None
+                    self.watchdog_stalled = False
+                    self.watchdog_stalled_since = None
 
             except Exception as e:
                 logger.error("Error during farm worker tick: %s", e, exc_info=True)
@@ -339,24 +374,17 @@ class FarmWorker:
 
             firing_alert = None
             for a in alerts:
-                active_at_raw = a.get("activeAt", "")
-                # Watchdog hygiene: ignore any alert instance whose activeAt is earlier than scenario_primed_at (allowing 65s scheduler floor tolerance)
-                if self.scenario_primed_at and active_at_raw:
-                    try:
-                        dt_active = datetime.fromisoformat(str(active_at_raw).replace("Z", "+00:00"))
-                        dt_primed = datetime.fromisoformat(str(self.scenario_primed_at).replace("Z", "+00:00"))
-                        if dt_active < (dt_primed - timedelta(seconds=65)):
-                            logger.info(
-                                "Watchdog ignoring stale alert instance (activeAt: %s < primed_at: %s)",
-                                active_at_raw,
-                                self.scenario_primed_at,
-                            )
-                            continue
-                    except Exception as parse_ex:
-                        logger.warning("Error parsing alert activeAt or primed_at: %s", parse_ex)
-
-                firing_alert = a
-                break
+                target_node = a.get("labels", {}).get("node_id", "node-07")
+                node = self.simulator.state.nodes.get(target_node)
+                # The correct condition for acting on a firing instance is that the node it names
+                # is currently over its limit with a shot allocated in the farm state.
+                if (
+                    node
+                    and (node.temperature_celsius >= node.thermal_limit_celsius or node.status == NodeStatus.THROTTLED)
+                    and bool(node.current_shot_id)
+                ):
+                    firing_alert = a
+                    break
 
             if firing_alert:
                 target_node = firing_alert.get("labels", {}).get("node_id", "node-07")
@@ -425,6 +453,9 @@ class FarmWorker:
         self.simulator.inject_scenario(scenario)
         self._last_investigated_node = None
         self.is_investigating = False
+        self._over_limit_detected_at = None
+        self.watchdog_stalled = False
+        self.watchdog_stalled_since = None
         self.scenario_primed_by = "demo"
         self.scenario_primed_at = datetime.now(timezone.utc).isoformat()
         self.fault_injected_at = time.time()

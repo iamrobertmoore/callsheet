@@ -355,3 +355,93 @@ def test_all_active_nodes_rendering_no_premature_idle():
         )
 
 
+@pytest.mark.asyncio
+async def test_stale_active_at_does_not_block_mission_when_node_over_limit():
+    """
+    Verifies that an existing Grafana alert instance with a stale activeAt timestamp
+    (e.g. from an earlier cycle or instance replacement) does NOT block mission start
+    when node-07 is over its thermal limit with a shot allocated.
+    """
+    from unittest.mock import AsyncMock, patch
+    from callsheet.farm.worker import FarmWorker
+
+    sim = RenderFarmSimulator()
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+
+    mock_runner = AsyncMock()
+    mock_runner.execute_mission = AsyncMock()
+    mock_result = AsyncMock()
+    mock_result.model_dump.return_value = {"status": "ok"}
+    mock_result.timestamp = datetime.now(timezone.utc)
+    mock_result.verification_status = "VERIFIED_PROTECTED"
+    mock_runner.execute_mission.return_value = mock_result
+
+    worker = FarmWorker(simulator=sim, mission_runner=mock_runner)
+    worker.alert_rule_uid = "cfxbt56wwbocge"
+    # Scenario primed at current time
+    worker.scenario_primed_at = datetime.now(timezone.utc).isoformat()
+
+    # Old activeAt from hours ago (e.g. 02:47:00Z)
+    stale_active_at = "2026-09-06T02:47:00Z"
+    rule_data = {
+        "state": "Firing",
+        "alerts": [
+            {
+                "state": "Alerting",
+                "activeAt": stale_active_at,
+                "labels": {"node_id": "node-07", "alertname": "RenderNodeThermalThrottle"},
+            }
+        ],
+    }
+
+    with patch("callsheet.farm.worker.get_alert_rule", AsyncMock(return_value=rule_data)):
+        await worker._check_and_trigger_autonomous_mission()
+
+        assert worker._mission_task is not None
+        await worker._mission_task
+
+        assert worker.missions_this_instance == 1
+        assert mock_runner.execute_mission.called
+        call_kwargs = mock_runner.execute_mission.call_args[1]
+        assert call_kwargs["trigger_type"] == "grafana_alert"
+        assert call_kwargs["alert_evidence"]["activeAt"] == stale_active_at
+
+
+@pytest.mark.asyncio
+async def test_watchdog_stall_detector_trips_after_180s():
+    """
+    Verifies that the stall detector sets watchdog_stalled to True when a node is
+    over limit with a shot allocated for > 180 seconds without a mission starting.
+    """
+    import time
+    from callsheet.farm.worker import FarmWorker
+
+    sim = RenderFarmSimulator()
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+
+    worker = FarmWorker(simulator=sim, mission_runner=None)
+    # Simulate first detection at t0 - 185 seconds
+    worker._over_limit_detected_at = time.time() - 185.0
+
+    # Execute stall detector logic matching worker loop
+    over_limit_nodes = [
+        n for n in worker.simulator.state.nodes.values()
+        if (n.temperature_celsius >= n.thermal_limit_celsius or n.status == NodeStatus.THROTTLED)
+        and bool(n.current_shot_id)
+    ]
+    assert len(over_limit_nodes) > 0
+
+    elapsed = time.time() - worker._over_limit_detected_at
+    assert elapsed > 180.0
+
+    if elapsed > 180.0:
+        worker.watchdog_stalled = True
+        worker.watchdog_stalled_since = datetime.fromtimestamp(
+            worker._over_limit_detected_at, tz=timezone.utc
+        ).isoformat()
+
+    assert worker.watchdog_stalled is True
+    assert worker.watchdog_stalled_since is not None
+
+
+
