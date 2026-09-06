@@ -390,3 +390,83 @@ def test_no_code_path_assigns_unparsed_frame_duration():
                         assert node.value.id not in ("normal_sec", "throttled_sec", "20.0"), (
                             f"Illegal synthetic variable assigned to verified_rate_sec: {node.value.id}"
                         )
+
+
+@pytest.mark.asyncio
+async def test_verification_progress_cleared_after_mission():
+    """
+    Asserts that runner.verification_progress is strictly None after execute_mission returns,
+    both on successful execution and when an unhandled exception occurs.
+    """
+    sim = RenderFarmSimulator()
+    sim.inject_scenario(ScenarioType.THERMAL_THROTTLING)
+    dispatcher = InterventionDispatcher(sim)
+
+    runner = MultiStepMissionRunner(
+        dispatcher=dispatcher,
+        project_id="test-project",
+        location="global",
+        model_name="gemini-3.8-flash",
+    )
+
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    future_epoch = now_epoch + 10.0
+    future_ns = int(future_epoch * 1e9)
+
+    async def mock_mcp(toolset, tool_name, arguments):
+        if tool_name == "query_prometheus":
+            expr = arguments.get("expr", "")
+            if "timestamp" in expr:
+                return {"data": [{"metric": {"node_id": "node-11"}, "value": [future_epoch, str(future_epoch)]}]}
+            if "node-11" in expr or "node-12" in expr:
+                return {"data": [{"metric": {"node_id": "node-11"}, "value": [future_epoch, "62.4"]}]}
+            return {"data": [{"metric": {"node_id": "node-07"}, "value": [now_epoch, "94.8"]}]}
+        if tool_name == "query_loki_logs":
+            if "node-07" in arguments.get("logql", ""):
+                return {"data": [{"line": "CRITICAL: Thermal junction temperature on node-07 reached 94.8C. Hardware clock down-throttled to 800MHz."}]}
+            return {"data": [{
+                "line": "Frame 1061 rendered on node-11 successfully in 20.0s.",
+                "timestamp": str(future_ns),
+            }]}
+        if tool_name == "grafana_api_request":
+            ep = arguments.get("endpoint", "")
+            if "node-07" in ep and "/api/search" in ep:
+                return {"data": {"traces": [{"traceID": "abc123def456", "durationMs": 65000, "startTimeUnixNano": 1000000}]}}
+            if "/api/search" in ep:
+                return {"data": {"traces": [{"traceID": "trace999", "durationMs": 20000, "startTimeUnixNano": future_ns}]}}
+            if "trace999" in ep:
+                return {"data": {"batches": [{"scopeSpans": [{"spans": [{"name": "raytrace_volumetrics_pass", "startTimeUnixNano": 0, "endTimeUnixNano": 17000000000}]}]}]}}
+            return {}
+        return {}
+
+    mock_gemini = AsyncMock()
+    mock_gemini.return_value.text = "Briefing: Mission complete."
+
+    with patch.object(runner, "_execute_mcp_tool", side_effect=mock_mcp), \
+         patch.object(runner.genai_client.aio.models, "generate_content", mock_gemini):
+        # 1. Normal run
+        res = await runner.execute_mission(
+            show_id="show-aethelgard",
+            max_poll_seconds=1.0,
+            poll_interval_seconds=0.1,
+        )
+        assert res.verification_status == "VERIFIED_PROTECTED"
+        assert runner.verification_progress is None
+
+        # 2. Exceptional run (simulating crash during verification)
+        async def mock_crashing_mcp(toolset, tool_name, arguments):
+            if tool_name == "query_prometheus" and "node-11" in arguments.get("expr", ""):
+                raise RuntimeError("Network partition during verification")
+            return await mock_mcp(toolset, tool_name, arguments)
+
+        with patch.object(runner, "_execute_mcp_tool", side_effect=mock_crashing_mcp):
+            try:
+                await runner.execute_mission(
+                    show_id="show-aethelgard",
+                    max_poll_seconds=1.0,
+                    poll_interval_seconds=0.1,
+                )
+            except Exception:
+                pass
+            assert runner.verification_progress is None
+

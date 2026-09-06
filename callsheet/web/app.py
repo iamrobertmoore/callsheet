@@ -173,10 +173,36 @@ async def health_check():
     return data
 
 
+def serialize_approvals() -> List[Dict[str, Any]]:
+    """
+    Serializes all recorded approvals, dynamically computing real-time deadline_impact
+    and cost_of_waiting from simulator.calculate_buffer_margin_hours('show-solarflare').
+    """
+    result = []
+    margin_sf = simulator.calculate_buffer_margin_hours("show-solarflare")
+    mins_sf = int(round(margin_sf * 60))
+    for a in PENDING_APPROVALS.values():
+        d = a.model_dump(mode="json")
+        if a.status == "PENDING" and a.shot_id in ("sh_204", "204"):
+            sec_show_name = "Solar Flare: Redux"
+            if mins_sf > 0:
+                d["deadline_impact"] = f"{sec_show_name} delivery buffer breaches in {mins_sf} minutes if unapproved."
+                d["cost_of_waiting"] = (
+                    f"Every minute of delay costs 1.0 min of contractual buffer. "
+                    f"{sec_show_name} margin slips by 1.0 hr every 60 min of delay. "
+                    f"Contractual breach in {mins_sf} minutes without approval."
+                )
+            else:
+                d["deadline_impact"] = f"{sec_show_name} delivery buffer has breached contractual deadline."
+                d["cost_of_waiting"] = "Buffer margin exhausted (0 minutes remaining). Immediate action required."
+        result.append(d)
+    return result
+
+
 @app.get("/api/approvals")
 async def list_approvals():
     """Returns all recorded producer approvals and pending requests."""
-    return [a.model_dump(mode="json") for a in PENDING_APPROVALS.values()]
+    return serialize_approvals()
 
 
 @app.post("/api/approvals/{approval_id}")
@@ -234,7 +260,7 @@ async def get_farm_state():
         "alert_rule_status": worker.alert_rule_status,
         "alert_rule_uid": worker.alert_rule_uid,
         "tick_cadence": worker.tick_cadence_stats,
-        "pending_approvals": [a.model_dump(mode="json") for a in PENDING_APPROVALS.values()],
+        "pending_approvals": serialize_approvals(),
         "cycle_epoch": worker.current_cycle_epoch,
         "next_reset_at_utc": worker.next_reset_at_utc,
     }
@@ -426,6 +452,10 @@ def render_ssr_slate(shows: dict, mission: Optional[dict]) -> str:
                 deadline_str = str(deadline)
 
         status_label, margin_hrs, buffer_margin = simulator.get_show_status(show_id)
+        has_pending_hold = any(a.status == "PENDING" for a in PENDING_APPROVALS.values())
+        if has_pending_hold and show_id in ('show-solarflare', 'show-solar'):
+            status_label = "AT RISK"
+
         margin_class = "metric-healthy"
 
         if show_id == 'show-aethelgard' and is_intervened:
@@ -1587,13 +1617,18 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             margin-bottom: 12px;
         }
         .approval-arithmetic {
-            background: #080c12;
-            border: 1px solid var(--rule);
-            padding: 10px 14px;
+            background: var(--surface-inset, #0c0c0b);
+            border: 1px solid var(--rule, rgba(235, 230, 220, 0.15));
+            padding: 12px 14px;
+            font-family: var(--font-mono);
             font-size: 12px;
-            color: #79c0ff;
+            color: var(--text-secondary, #d0cbc2);
             line-height: 1.6;
             margin-bottom: 14px;
+        }
+        .approval-arithmetic strong {
+            color: var(--text-primary, #f5f2ec);
+            font-weight: 600;
         }
         .approval-controls {
             display: flex;
@@ -1935,7 +1970,10 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                 const data = await res.json();
 
                 const statusText = document.getElementById('agent-status-text');
-                if (data.verification_progress && data.verification_progress.active) {
+                const hasPendingHold = data.pending_approvals && data.pending_approvals.some(a => a.status === 'PENDING');
+                if (hasPendingHold) {
+                    statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> Tier 2 hold: awaiting producer approval';
+                } else if (data.verification_progress && data.verification_progress.active) {
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> ' + data.verification_progress.message;
                 } else if (data.is_investigating) {
                     statusText.innerHTML = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)';
@@ -1947,7 +1985,7 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
 
                 renderApprovalCards(data.pending_approvals);
 
-                renderSlate(data.shows, data.latest_mission, data.verification_progress);
+                renderSlate(data.shows, data.latest_mission, data.verification_progress, data.pending_approvals);
 
                 const sh118 = data.shots && data.shots.sh_118;
                 const banner = document.getElementById('delivery-banner');
@@ -2015,17 +2053,22 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        function renderSlate(shows, latestMission, verificationProgress) {
+        function renderSlate(shows, latestMission, verificationProgress, pendingApprovals) {
             const container = document.getElementById('slate-container');
             const showList = Object.values(shows);
             if (!showList.length) return;
 
             const isIntervened = latestMission && latestMission.intervention_record;
+            const hasPendingHold = pendingApprovals && pendingApprovals.some(a => a.status === 'PENDING');
 
             showList.forEach(s => {
                 let statusLabel = s.status_label || 'ON SCHEDULE';
                 let bufferMargin = s.buffer_margin_display || (s.buffer_margin_hours !== undefined ? (s.buffer_margin_hours < 1.0 && s.buffer_margin_hours > 0 ? `+${s.buffer_margin_hours.toFixed(1)}h / ${Math.round(s.buffer_margin_hours * 60)}m` : `+${s.buffer_margin_hours.toFixed(1)} hours`) : '+4.0 hours');
                 let marginClass = 'metric-healthy';
+
+                if (hasPendingHold && (s.id === 'show-solarflare' || s.id === 'show-solar')) {
+                    statusLabel = 'AT RISK';
+                }
 
                 if (s.id === 'show-aethelgard') {
                     if (verificationProgress && verificationProgress.active) {
@@ -2034,8 +2077,6 @@ PRODUCER_UI_TEMPLATE = """<!DOCTYPE html>
                     } else if (isIntervened) {
                         if (latestMission.verification_status === 'ESCALATED') {
                             statusLabel = 'ESCALATED';
-                        } else if (latestMission.verification_status === 'PENDING_APPROVAL') {
-                            statusLabel = 'PENDING APPROVAL';
                         } else if (latestMission.verification_status === 'VERIFICATION_INCONCLUSIVE') {
                             statusLabel = 'INCONCLUSIVE';
                         } else {
@@ -2364,146 +2405,256 @@ DEMO_UI_HTML = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Callsheet: Demo Control & Fault Injection Harness</title>
+    <title>Callsheet // Demo & Scenario Control Harness</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg: #090d13;
-            --surface: #121820;
-            --border: #232f3e;
-            --text: #c2cbd6;
-            --text-heading: #f0f6fc;
-            --text-muted: #7d8b99;
-            --accent: #388bfd;
-            --danger: #f85149;
-            --danger-bg: rgba(248, 81, 73, 0.15);
-            --warning: #d29922;
-            --warning-bg: rgba(210, 153, 34, 0.15);
+            --bg-page: #0b0c0e;
+            --bg-surface: #12141a;
+            --bg-card: #161922;
+            --bg-inset: #08090b;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --border-card: rgba(255, 255, 255, 0.12);
+            --border-active: rgba(235, 230, 220, 0.28);
+            --text-primary: #f0f2f5;
+            --text-secondary: #d0cbc2;
+            --text-muted: #717888;
+            --accent-warm: #d97706;
             --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            --font-mono: 'JetBrains Mono', monospace;
+            --font-mono: 'IBM Plex Mono', 'JetBrains Mono', monospace;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body {
+            height: 100vh;
+            overflow: hidden;
+            background-color: var(--bg-page);
+            color: var(--text-secondary);
+            font-family: var(--font-main);
+        }
+
         body {
-            background-color: var(--bg);
-            color: var(--text);
-            font-family: var(--font-main);
-            padding: 24px;
-        }
-
-        .container { max-width: 900px; margin: 0 auto; }
-        
-        .demo-notice {
-            background: var(--warning-bg);
-            border: 1px solid var(--warning);
-            color: #e3b341;
-            padding: 12px 16px;
-            border-radius: 6px;
-            margin-bottom: 24px;
-            font-size: 13px;
-        }
-
-        .card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            padding: 20px;
-            margin-bottom: 24px;
-        }
-
-        h1 { font-size: 20px; color: var(--text-heading); margin-bottom: 8px; }
-        p { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
-
-        .btn-group {
             display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
+            flex-direction: column;
+            padding: 20px 28px;
+            gap: 16px;
         }
 
-        button {
-            font-family: var(--font-main);
-            font-size: 13px;
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .brand {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+        }
+
+        .brand h1 {
+            font-size: 16px;
             font-weight: 600;
-            padding: 10px 16px;
+            letter-spacing: 0.05em;
+            color: var(--text-primary);
+            text-transform: uppercase;
+        }
+
+        .brand .tagline {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-muted);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .nav-link {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 6px 12px;
+            border: 1px solid var(--border-subtle);
             border-radius: 4px;
-            border: 1px solid transparent;
-            cursor: pointer;
             transition: all 0.15s ease;
         }
 
-        .btn-danger {
-            background: var(--danger-bg);
-            color: var(--danger);
-            border-color: rgba(248, 81, 73, 0.4);
+        .nav-link:hover {
+            color: var(--text-primary);
+            border-color: var(--border-active);
+            background: rgba(255, 255, 255, 0.04);
         }
-        .btn-danger:hover { background: rgba(248, 81, 73, 0.3); }
 
-        .btn-secondary {
-            background: #1c2430;
-            color: var(--text-heading);
-            border-color: var(--border);
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
         }
-        .btn-secondary:hover { background: #2a3545; }
 
-        .btn-primary {
-            background: #238636;
-            color: #ffffff;
+        .btn-scenario {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-card);
+            border-radius: 6px;
+            padding: 16px 20px;
+            cursor: pointer;
+            text-align: left;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            transition: all 0.15s ease;
+            color: var(--text-primary);
         }
-        .btn-primary:hover { background: #2ea043; }
 
-        .log-box {
-            background: #05080c;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 14px;
+        .btn-scenario:hover {
+            background: var(--bg-card);
+            border-color: var(--border-active);
+            transform: translateY(-1px);
+        }
+
+        .btn-scenario:active {
+            transform: translateY(0);
+        }
+
+        .btn-scenario .btn-title {
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.4;
+            color: var(--text-primary);
+        }
+
+        .btn-scenario .btn-meta {
             font-family: var(--font-mono);
-            font-size: 12px;
-            color: #58a6ff;
-            height: 220px;
-            overflow-y: auto;
+            font-size: 10px;
+            color: var(--text-muted);
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
         }
 
-        a { color: var(--accent); text-decoration: none; font-size: 13px; }
-        a:hover { text-decoration: underline; }
+        .btn-scenario.restore {
+            border-style: dashed;
+            opacity: 0.85;
+        }
+
+        .btn-scenario.restore:hover {
+            opacity: 1;
+        }
+
+        .log-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        .log-header {
+            padding: 10px 16px;
+            background: rgba(0, 0, 0, 0.25);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .log-header-title {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 500;
+            letter-spacing: 0.08em;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        .log-body {
+            flex: 1;
+            padding: 14px 16px;
+            background: var(--bg-inset);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            line-height: 1.6;
+            color: var(--text-secondary);
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .log-line {
+            margin-bottom: 4px;
+        }
+
+        .log-ts {
+            color: var(--text-muted);
+            margin-right: 8px;
+        }
+
+        .log-action {
+            color: var(--accent-warm);
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="demo-notice">
-            <strong>Demonstration Control Surface:</strong> This route is isolated for recording evaluation videos and manual scenario fault injection. The main product surface is at <a href="/">/ (Producer Dashboard)</a>.
+    <header>
+        <div class="brand">
+            <h1>Callsheet</h1>
+            <span class="tagline">// Demonstration Control Surface</span>
         </div>
+        <a class="nav-link" href="/">Return to Producer Dashboard &rarr;</a>
+    </header>
 
-        <div class="card">
-            <h1>Fault Injection & Scenario Controls</h1>
-            <p>Inject synthetic hardware degradation scenarios into the running render farm or trigger manual mission executions.</p>
+    <div class="grid">
+        <button class="btn-scenario" onclick="injectScenario('THERMAL_THROTTLING')">
+            <span class="btn-title">Thermal throttle on node-07, about three minutes to resolved</span>
+            <span class="btn-meta">Scenario 1 // Automatic Tier 1 failover to node-11</span>
+        </button>
 
-            <div class="btn-group">
-                <button class="btn-danger" onclick="injectScenario('THERMAL_THROTTLING')">Inject Scenario: Node-07 Thermal Throttling</button>
-                <button class="btn-danger" style="background: #4c1d95; color: #e9d5ff; border-color: #a855f7;" onclick="injectScenario('DOUBLE_FAULT')">Inject Scenario: Double Fault (Tier 2 Pre-emption)</button>
-                <button class="btn-secondary" onclick="injectScenario('MEMORY_LEAK_OOM')">Inject Scenario: Memory Leak (OOM)</button>
-                <button class="btn-secondary" onclick="injectScenario('BASELINE')">Restore Baseline Operations</button>
-                <button class="btn-primary" onclick="runManualMission()">Trigger Verified Mission</button>
-                <button class="btn-danger" style="background: #7f1d1d; color: #fca5a5; border-color: #ef4444;" onclick="runFailureMission()">Force Verification Failure (Failover Stall)</button>
-            </div>
+        <button class="btn-scenario" onclick="injectScenario('DOUBLE_FAULT')">
+            <span class="btn-title">Double fault, holds for your approval after about two minutes</span>
+            <span class="btn-meta">Scenario 2 // Tier 2 hold and producer approval</span>
+        </button>
+
+        <button class="btn-scenario" onclick="runFailureMission()">
+            <span class="btn-title">Forced verification failure, rollback to node-12</span>
+            <span class="btn-meta">Scenario 3 // Closed-loop quarantine and rollback</span>
+        </button>
+
+        <button class="btn-scenario restore" onclick="injectScenario('BASELINE')">
+            <span class="btn-title">Restore baseline</span>
+            <span class="btn-meta">Reset // Clear synthetic faults across farm nodes</span>
+        </button>
+    </div>
+
+    <div class="log-panel">
+        <div class="log-header">
+            <span class="log-header-title">Harness Activity Log</span>
+            <span id="harness-status" class="log-header-title" style="color: var(--accent-warm);">Ready</span>
         </div>
-
-        <div class="card">
-            <h1>Harness Activity Log</h1>
-            <div id="log-box" class="log-box">Harness ready. Telemetry worker active.</div>
+        <div id="log-box" class="log-body">
+            <div class="log-line"><span class="log-ts">[INIT]</span>Harness initialized. Autonomous watchdog active on live telemetry.</div>
         </div>
     </div>
 
     <script>
-        function log(msg) {
+        function log(msg, isAction = false) {
             const box = document.getElementById('log-box');
-            const time = new Date().toISOString().substring(11, 19) + ' UTC';
-            box.innerHTML = `[${time}] ${msg}<br>` + box.innerHTML;
+            const now = new Date();
+            const time = now.toISOString().substring(11, 19) + ' UTC';
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            line.innerHTML = `<span class="log-ts">[${time}]</span><span class="${isAction ? 'log-action' : ''}">${msg}</span>`;
+            box.insertBefore(line, box.firstChild);
         }
 
         async function injectScenario(scenario) {
-            log(`Injecting scenario: ${scenario}...`);
+            log(`Injecting scenario: ${scenario}...`, true);
+            const statusEl = document.getElementById('harness-status');
+            if (statusEl) statusEl.textContent = `Injecting ${scenario}...`;
             try {
                 const res = await fetch('/api/scenario', {
                     method: 'POST',
@@ -2511,29 +2662,18 @@ DEMO_UI_HTML = """<!DOCTYPE html>
                     body: JSON.stringify({ scenario: scenario })
                 });
                 const data = await res.json();
-                log(`Scenario active: ${data.scenario}. Watchdog will detect and intervene automatically.`);
+                log(`Scenario confirmed active: ${data.scenario}. Autonomous watchdog will observe and intervene.`);
+                if (statusEl) statusEl.textContent = `Active: ${data.scenario}`;
             } catch (err) {
                 log(`Error injecting scenario: ${err}`);
-            }
-        }
-
-        async function runManualMission() {
-            log('Triggering manual 7-step mission across Prometheus, Loki, Tempo, Vertex AI, and Closed-Loop Verification...');
-            try {
-                const res = await fetch('/api/mission', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ show_id: 'show-aethelgard', force_verification_fault: false })
-                });
-                const data = await res.json();
-                log(`Mission complete: ${data.anomaly_detected} -> Verification: ${data.verification_status} (Buffer: ${data.intervention_record ? data.intervention_record.status : 'None'})`);
-            } catch (err) {
-                log(`Mission error: ${err}`);
+                if (statusEl) statusEl.textContent = 'Error';
             }
         }
 
         async function runFailureMission() {
-            log('Triggering 7-step mission with FORCED post-intervention verification failure...');
+            log('Triggering mission with FORCED post-intervention verification failure...', true);
+            const statusEl = document.getElementById('harness-status');
+            if (statusEl) statusEl.textContent = 'Running forced verification failure...';
             try {
                 const res = await fetch('/api/mission', {
                     method: 'POST',
@@ -2541,9 +2681,11 @@ DEMO_UI_HTML = """<!DOCTYPE html>
                     body: JSON.stringify({ show_id: 'show-aethelgard', force_verification_fault: true })
                 });
                 const data = await res.json();
-                log(`Mission completed with ESCALATION: Verification: ${data.verification_status}. Briefing generated with immediate human TD escalation recommendation.`);
+                log(`Mission complete: Verification status ${data.verification_status}. Rollback executed.`);
+                if (statusEl) statusEl.textContent = `Completed: ${data.verification_status}`;
             } catch (err) {
                 log(`Mission error: ${err}`);
+                if (statusEl) statusEl.textContent = 'Error';
             }
         }
     </script>
@@ -2589,32 +2731,43 @@ async def get_producer_dashboard():
     incident_status = mission.get("incident_status", "") if mission else ""
     steps_len = len(steps)
 
-    pending_approvals = [a for a in PENDING_APPROVALS.values() if a.status == "PENDING"]
+    pending_approvals = [a for a in serialize_approvals() if a.get("status") == "PENDING"]
     if pending_approvals:
-        approval_cards_html = "".join([
-            f'<div class="approval-banner">'
-            f'<div class="approval-header">'
-            f'<span class="approval-badge">TIER 2 APPROVAL REQUIRED // HOLD ACTIVE</span>'
-            f'<span class="approval-id mono">{a.id}</span>'
-            f'</div>'
-            f'<div class="approval-title">{a.action_title}</div>'
-            f'<div class="approval-plan">{a.plan_summary}</div>'
-            f'<div class="approval-arithmetic mono">'
-            f'<div><strong>Buffer Loss Rate:</strong> {a.buffer_loss_rate}</div>'
-            f'<div><strong>Cost of Waiting:</strong> {a.cost_of_waiting}</div>'
-            f'<div><strong>Deadline Impact:</strong> {a.deadline_impact}</div>'
-            f'</div>'
-            f'<div class="approval-controls">'
-            f'<button class="btn-approve" onclick="handleProducerDecision(\'{a.id}\', \'approve\')">Approve Reallocation</button>'
-            f'<button class="btn-decline" onclick="handleProducerDecision(\'{a.id}\', \'decline\')">Decline & Escalate</button>'
-            f'</div>'
-            f'</div>'
-            for a in pending_approvals
-        ])
+        cards = []
+        for a in pending_approvals:
+            app_id = a["id"]
+            action_title = a["action_title"]
+            plan_summary = a["plan_summary"]
+            loss_rate = a["buffer_loss_rate"]
+            cost = a["cost_of_waiting"]
+            impact = a["deadline_impact"]
+            cards.append(
+                f'<div class="approval-banner">'
+                f'<div class="approval-header">'
+                f'<span class="approval-badge">TIER 2 APPROVAL REQUIRED // HOLD ACTIVE</span>'
+                f'<span class="approval-id mono">{app_id}</span>'
+                f'</div>'
+                f'<div class="approval-title">{action_title}</div>'
+                f'<div class="approval-plan">{plan_summary}</div>'
+                f'<div class="approval-arithmetic mono">'
+                f'<div><strong>Buffer Loss Rate:</strong> {loss_rate}</div>'
+                f'<div><strong>Cost of Waiting:</strong> {cost}</div>'
+                f'<div><strong>Deadline Impact:</strong> {impact}</div>'
+                f'</div>'
+                f'<div class="approval-controls">'
+                f'<button class="btn-approve" onclick="handleProducerDecision(\'{app_id}\', \'approve\')">Approve Reallocation</button>'
+                f'<button class="btn-decline" onclick="handleProducerDecision(\'{app_id}\', \'decline\')">Decline & Escalate</button>'
+                f'</div>'
+                f'</div>'
+            )
+        approval_cards_html = "".join(cards)
     else:
         approval_cards_html = ""
 
-    if worker.verification_progress and worker.verification_progress.get("active"):
+    has_pending_hold = bool(pending_approvals)
+    if has_pending_hold:
+        status_text_html = '<span class="status-pip" style="color: var(--heat-warm);"></span> Tier 2 hold: awaiting producer approval'
+    elif worker.verification_progress and worker.verification_progress.get("active"):
         status_text_html = f'<span class="status-pip" style="color: var(--heat-warm);"></span> {worker.verification_progress.get("message")}'
     elif worker.is_investigating:
         status_text_html = '<span class="status-pip" style="color: var(--heat-warm);"></span> INVESTIGATING ANOMALY (MCP)'

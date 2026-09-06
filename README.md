@@ -12,6 +12,8 @@ Callsheet monitors render operations through Grafana Cloud over the Model Contex
 
 - Production Application: [https://callsheet-746874807798.us-central1.run.app](https://callsheet-746874807798.us-central1.run.app)
 - Public Grafana Control Tower: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd)
+- Hackathon Walkthrough Guide: [JUDGING.md](JUDGING.md) (10-minute evaluation guide with 3 interactive demos)
+- Operational Boundaries & Constraints: [LIMITATIONS.md](LIMITATIONS.md)
 
 ## Architecture
 
@@ -42,6 +44,21 @@ Grafana Cloud evaluates the Callsheet rule group once a minute on this stack reg
 ## Architecture and Native Google ADK Integration
 
 Callsheet is built natively on the Google Agent Development Kit (ADK). It uses `google.adk.tools.mcp_tool.McpToolset` with `StreamableHTTPConnectionParams` to manage Model Context Protocol tool lifecycle, streaming HTTP connections, and dynamic schema binding directly to the Grafana Cloud MCP server.
+
+### Model Context Protocol (MCP) Tool Integration
+
+Callsheet queries telemetry and updates Grafana Cloud through these Model Context Protocol tools:
+
+| MCP Tool | Protocol / Transport | Purpose in Callsheet | Cloud Resource Affected |
+| :--- | :--- | :--- | :--- |
+| `list_datasources` | MCP (Streamable HTTP) | Connectivity verification and health check probe | Prometheus, Loki, Tempo instances |
+| `query_prometheus` | MCP (Streamable HTTP) | Step 1 & 6: Node temperatures, clocks, sample timestamps | Prometheus time-series metrics |
+| `query_loki_logs` | MCP (Streamable HTTP) | Step 2 & 6: Frame durations, hardware throttle logs | Loki structured log stream |
+| `grafana_api_request` | MCP (Streamable HTTP) | Step 2 & 6: Tempo trace queries and Alertmanager status | Tempo traces (`/api/search`, `/api/traces`) and Alertmanager |
+| `search_incidents` | MCP (Streamable HTTP) | Step 0: Discovers active Grafana IRM incidents | Grafana Incident Management (IRM) |
+| `create_incident` | MCP (Streamable HTTP) | Step 0: Opens new incident if none exists for firing alert | Grafana Incident Management (IRM) |
+| `update_incident` | MCP (Streamable HTTP) | Step 7: Resolves incident upon verified remediation | Grafana Incident Management (IRM) |
+| `CreateKeyUpdate` | Twirp RPC | Step 5 & 7: Timeline notes and resolution summaries | Grafana IRM incident timeline |
 
 ## Blast Radius and Authority Policy
 

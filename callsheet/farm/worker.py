@@ -417,6 +417,8 @@ class FarmWorker:
         finally:
             self.is_investigating = False
             self._mission_task = None
+            if self.mission_runner:
+                self.mission_runner.verification_progress = None
 
     def inject_scenario(self, scenario: ScenarioType) -> None:
         """Injects a scenario into the running simulator (used by /demo or filming)."""
@@ -468,4 +470,6 @@ class FarmWorker:
             return self.latest_mission
         finally:
             self.is_investigating = False
+            if self.mission_runner:
+                self.mission_runner.verification_progress = None
 

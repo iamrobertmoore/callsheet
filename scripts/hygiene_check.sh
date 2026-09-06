@@ -71,7 +71,7 @@ else
 fi
 
 echo "Check 4: Em-dash hygiene in project source files and documentation..."
-EM_DASH_MATCHES=$(git grep -F "—" -- 'callsheet/*' 'README.md' 'scripts/*' ':(exclude)scripts/hygiene_check.sh' || true)
+EM_DASH_MATCHES=$(git grep -F "—" -- 'callsheet/*' 'README.md' 'JUDGING.md' 'LIMITATIONS.md' 'scripts/*' ':(exclude)scripts/hygiene_check.sh' || true)
 if [ -n "$EM_DASH_MATCHES" ]; then
     echo "ERROR: Found forbidden em-dash in project source files:"
     echo "$EM_DASH_MATCHES"
