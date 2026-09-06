@@ -35,9 +35,16 @@ class InterventionDispatcher:
     Manages automated interventions on the render farm and maintains an audit log.
     """
 
-    def __init__(self, simulator: RenderFarmSimulator):
+    def __init__(self, simulator: RenderFarmSimulator, max_history: int = 50):
         self.simulator = simulator
+        self.max_history = max_history
         self.history: List[InterventionRecord] = []
+
+    def record_intervention(self, record: InterventionRecord) -> None:
+        """Appends an intervention record and enforces the maximum history bound."""
+        self.history.append(record)
+        while len(self.history) > self.max_history:
+            self.history.pop(0)
 
     def execute_reallocation(
         self,
@@ -101,7 +108,7 @@ class InterventionDispatcher:
             status=raw_result["status"],
             telemetry_evidence=telemetry_evidence or {},
         )
-        self.history.append(record)
+        self.record_intervention(record)
         return record
 
     def list_history(self) -> List[InterventionRecord]:

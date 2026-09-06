@@ -50,9 +50,9 @@ gcloud run deploy "$SERVICE_NAME" \
     --platform managed \
     --allow-unauthenticated \
     --min-instances 1 \
-    --max-instances 2 \
+    --max-instances 1 \
     --no-cpu-throttling \
-    --memory 512Mi \
+    --memory 1Gi \
     --cpu 1 \
     --quiet \
     --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},VERTEX_AI_LOCATION=global,GRAFANA_URL=${GRAFANA_URL},GRAFANA_ORG_ID=1,GRAFANA_MCP_SERVER_URL=http://127.0.0.1:8000/mcp,OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT},OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS}" \

@@ -40,8 +40,17 @@ import functools
 
 logger = logging.getLogger(__name__)
 
-# Registry of rendered panel PNG images keyed by mission ID
+# Bounded registry of rendered panel PNG images keyed by mission ID (max 10)
+MAX_CACHED_PANEL_IMAGES = 10
 MISSION_PANEL_IMAGES: Dict[str, bytes] = {}
+
+
+def store_panel_image(mission_id: str, img_bytes: bytes) -> None:
+    """Stores a panel PNG image in the bounded cache, evicting oldest if count > 10."""
+    MISSION_PANEL_IMAGES[mission_id] = img_bytes
+    while len(MISSION_PANEL_IMAGES) > MAX_CACHED_PANEL_IMAGES:
+        oldest_key = next(iter(MISSION_PANEL_IMAGES))
+        del MISSION_PANEL_IMAGES[oldest_key]
 
 
 def clears_verification_progress(func):
@@ -281,6 +290,7 @@ class MultiStepMissionRunner:
         """
         Dynamically renders a panel PNG via Grafana MCP get_panel_image.
         """
+        toolset = None
         try:
             params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
             toolset = create_grafana_mcp_toolset(params)
@@ -300,6 +310,12 @@ class MultiStepMissionRunner:
                 return base64.b64decode(img_res["data"])
         except Exception as e:
             logger.warning("render_panel_image failed: %s", e)
+        finally:
+            if toolset:
+                try:
+                    await toolset.close()
+                except Exception as ex:
+                    logger.warning("Error closing render_panel_image toolset: %s", ex)
         return None
 
     async def _generate_four_deeplinks(
@@ -716,24 +732,47 @@ class MultiStepMissionRunner:
         alert_evidence: Optional[Dict[str, Any]] = None,
     ) -> MissionResult:
         """
-        Runs the complete 7-step closed-loop mission strictly driven by Grafana Cloud MCP responses:
-        0. Grafana Alert Trigger (Alert-driven autonomous loop) - DETERMINISTIC_ALERT
-        1. Anomaly Detection (Prometheus response parsing) - DETERMINISTIC_TELEMETRY
-        2. Signal Correlation (Loki Logs & Tempo Trace Spans response parsing) - DETERMINISTIC_TELEMETRY
-        3. Root Cause Deduction (Vertex AI Gemini reasoning over retrieved signals) - GENERATIVE_SYNTHESIS
-        4. Production Impact Calculation - DETERMINISTIC_ARITHMETIC
-        5. Workload Reallocation Intervention - DETERMINISTIC_ACTION
-        6. Post-Intervention Telemetry Verification (Grafana Cloud audit of target node) - DETERMINISTIC_VERIFICATION
-        7. Producer Callsheet Briefing Generation (Vertex AI Gemini) - GENERATIVE_SYNTHESIS
+        Runs the complete 7-step closed-loop mission strictly driven by Grafana Cloud MCP responses.
+        Ensures MCP toolset and its background streaming sessions are cleanly closed upon completion.
         """
+        params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
+        toolset = create_grafana_mcp_toolset(params)
+        try:
+            return await self._execute_mission_impl(
+                toolset=toolset,
+                show_id=show_id,
+                force_verification_fault=force_verification_fault,
+                poll_interval_seconds=poll_interval_seconds,
+                max_poll_seconds=max_poll_seconds,
+                trigger_type=trigger_type,
+                scenario_primed_by=scenario_primed_by,
+                scenario_primed_at=scenario_primed_at,
+                alert_evidence=alert_evidence,
+            )
+        finally:
+            if toolset:
+                try:
+                    await toolset.close()
+                except Exception as ex:
+                    logger.warning("Error closing mission toolset: %s", ex)
+
+    async def _execute_mission_impl(
+        self,
+        toolset: Any,
+        show_id: str = "show-aethelgard",
+        force_verification_fault: bool = False,
+        poll_interval_seconds: Optional[float] = None,
+        max_poll_seconds: Optional[float] = None,
+        trigger_type: str = "grafana_alert",
+        scenario_primed_by: Optional[str] = None,
+        scenario_primed_at: Optional[str] = None,
+        alert_evidence: Optional[Dict[str, Any]] = None,
+    ) -> MissionResult:
         steps: List[MissionStep] = []
         self.mission_mcp_read_calls = 0
         self.mission_mcp_write_calls = 0
         mission_id = f"mission_{uuid.uuid4().hex[:8]}"
 
-        # Connect to MCP toolset
-        params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
-        toolset = create_grafana_mcp_toolset(params)
         self.dashboard_uid = await self._discover_dashboard_uid(toolset)
 
         # ---------------------------------------------------------
@@ -1972,7 +2011,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 )
                 if isinstance(img_res, dict) and img_res.get("_is_image") and img_res.get("data"):
                     img_bytes = base64.b64decode(img_res["data"])
-                    MISSION_PANEL_IMAGES[mission_id] = img_bytes
+                    store_panel_image(mission_id, img_bytes)
                     panel_image_url = f"/api/missions/{mission_id}/panel.png"
             except Exception as e:
                 logger.warning("Failed to capture panel image: %s", e)
@@ -2138,7 +2177,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
             )
             if isinstance(img_res, dict) and img_res.get("_is_image") and img_res.get("data"):
                 img_bytes = base64.b64decode(img_res["data"])
-                MISSION_PANEL_IMAGES[mission_id] = img_bytes
+                store_panel_image(mission_id, img_bytes)
                 panel_image_url = f"/api/missions/{mission_id}/panel.png"
         except Exception as e:
             logger.warning("Failed to capture panel image: %s", e)
@@ -2311,21 +2350,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
     ) -> Dict[str, Any]:
         """
         Processes a human producer decision (APPROVE or DECLINE) on a pending Tier 2 action.
-        On APPROVE:
-        - Executes pre-emption (shot 204 to node-08, quarantine node-03, queue shot 301).
-        - Runs full Step 6 verification against node-08.
-        - Writes Step 6 annotation and incident note for node-08.
-        - Records alert cleared for node-03 explicitly naming node-03.
-        - Generates dual-move Gemini briefing covering both moves.
-        - Posts resolution summary note.
-        - Finally resolves incident once, LAST.
-        On DECLINE:
-        - Quarantines node-03 immediately (Tier 1 thermal protection).
-        - Unallocates shot 204 to QUEUED.
-        - Writes decline note with reason into incident.
-        - Posts decline annotation.
-        - Records alert cleared for node-03.
-        - Leaves incident ACTIVE.
+        Ensures MCP toolset and its background streaming sessions are cleanly closed upon completion.
         """
         if approval_id not in PENDING_APPROVALS:
             raise KeyError(f"Approval {approval_id} not found in pending approvals registry.")
@@ -2336,6 +2361,28 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
 
         params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
         toolset = create_grafana_mcp_toolset(params)
+        try:
+            return await self._handle_approval_decision_impl(
+                toolset=toolset,
+                approval_id=approval_id,
+                decision=decision,
+                reason=reason,
+            )
+        finally:
+            if toolset:
+                try:
+                    await toolset.close()
+                except Exception as ex:
+                    logger.warning("Error closing approval toolset: %s", ex)
+
+    async def _handle_approval_decision_impl(
+        self,
+        toolset: Any,
+        approval_id: str,
+        decision: str,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        approval = PENDING_APPROVALS[approval_id]
         now_iso = datetime.now(timezone.utc).isoformat()
 
         if decision.lower() == "approve":
@@ -2387,7 +2434,7 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
                 buffer_margin_hours=raw_res["buffer_margin_hours"],
                 status=raw_res["status"],
             )
-            self.dispatcher.history.append(record)
+            self.dispatcher.record_intervention(record)
 
             # 3. Create initial annotation for Tier 2 intervention
             ann_id = None

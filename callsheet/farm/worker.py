@@ -138,6 +138,14 @@ class FarmWorker:
         self.watchdog_stalled: bool = False
         self.watchdog_stalled_since: Optional[str] = None
         self._over_limit_detected_at: Optional[float] = None
+        self._toolset: Optional[Any] = None
+
+    async def get_toolset(self) -> Any:
+        """Returns the persistent McpToolset instance for watchdog polling and health probes."""
+        if self._toolset is None:
+            params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
+            self._toolset = create_grafana_mcp_toolset(params)
+        return self._toolset
 
     @property
     def current_cycle_epoch(self) -> int:
@@ -190,8 +198,7 @@ class FarmWorker:
     async def _init_alert_rule(self) -> None:
         """Initializes or binds the Grafana alert rule for autonomous watchdog monitoring."""
         try:
-            params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
-            toolset = create_grafana_mcp_toolset(params)
+            toolset = await self.get_toolset()
             rule = await ensure_alert_rule(toolset, self.deployment_id)
             if rule and "uid" in rule:
                 self.alert_rule_uid = rule["uid"]
@@ -221,7 +228,7 @@ class FarmWorker:
         )
 
     async def stop(self) -> None:
-        """Stops the continuous emission loop."""
+        """Stops the continuous emission loop and releases persistent MCP toolset."""
         self._running = False
         if self._task:
             self._task.cancel()
@@ -237,6 +244,12 @@ class FarmWorker:
             except asyncio.CancelledError:
                 pass
             self._mission_task = None
+        if self._toolset:
+            try:
+                await self._toolset.close()
+            except Exception as ex:
+                logger.warning("Error closing persistent worker toolset: %s", ex)
+            self._toolset = None
         self.emitter.shutdown()
         logger.info("Farm continuous worker stopped.")
 
@@ -351,10 +364,8 @@ class FarmWorker:
             if not self.alert_rule_uid:
                 return
 
-        params = get_grafana_mcp_connection_params(mcp_server_url=self.mcp_server_url)
-        toolset = create_grafana_mcp_toolset(params)
-
         try:
+            toolset = await self.get_toolset()
             rule_data = await get_alert_rule(toolset, self.alert_rule_uid)
             self.alert_rule_status = "ok"
             self.alert_rule_state = rule_data.get("state", "Normal")

@@ -183,6 +183,7 @@ The `/api/health` endpoint proves live operational state in a single request wit
 - `tick_cadence`: Live statistics for the 5-second watchdog loop ticks and latency
 - `watchdog_stalled`: Boolean flag indicating if an alert has been unserviced for >180 seconds
 - `watchdog_stalled_since`: UTC timestamp when the stall condition was first flagged, or `null`
+- `process_rss_mb`: Resident set size (RSS) memory usage in megabytes (from resource.getrusage)
 
 See [LIMITATIONS.md](LIMITATIONS.md) for full operational constraints, simulator architecture details, and Gemini boundaries.
 

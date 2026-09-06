@@ -52,6 +52,7 @@ curl -s https://callsheet-746874807798.us-central1.run.app/api/health | jq .
 - `tick_cadence`: Live statistics for the 5-second watchdog loop ticks and latency
 - `watchdog_stalled`: Boolean flag indicating if an alert has been unserviced for >180 seconds
 - `watchdog_stalled_since`: UTC timestamp when the stall condition was first flagged, or `null`
+- `process_rss_mb`: Resident set size (RSS) memory usage in megabytes (from resource.getrusage)
 
 ---
 
@@ -66,8 +67,8 @@ Open these two tabs side-by-side:
    - Executive briefing with client-ready communication notes and audit trail.
 
 2. **Public Grafana Control Tower**: [Callsheet Media Production Control Tower](https://bigforest2172.grafana.net/public-dashboards/a9028daf791643b8899a10531f6b31dd)
-   - Real-time Prometheus node temperatures across all cluster blades with thermal limit threshold line.
-   - Live frame render durations measuring nominal throughput (20.0s) and throttling spikes.
+   - Real-time Prometheus node temperatures across all cluster blades.
+   - Live frame render durations measuring nominal throughput and throttling spikes.
 
 ---
 

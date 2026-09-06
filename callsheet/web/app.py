@@ -17,9 +17,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import urllib.parse
 
+import resource
+import sys
+
 logger = logging.getLogger(__name__)
 
-from callsheet.agent.mission import MultiStepMissionRunner, MISSION_PANEL_IMAGES
+from callsheet.agent.mission import MultiStepMissionRunner, MISSION_PANEL_IMAGES, store_panel_image
 from callsheet.farm.models import ScenarioType, ShotStatus, PENDING_APPROVALS, ApprovalRecord
 from callsheet.farm.simulator import RenderFarmSimulator
 from callsheet.farm.worker import FarmWorker
@@ -42,6 +45,14 @@ worker = FarmWorker(
 )
 
 
+def get_process_rss_mb() -> float:
+    """Reads resident set size (RSS) from resource.getrusage at request time."""
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return round(usage / (1024.0 * 1024.0), 2)
+    return round(usage / 1024.0, 2)
+
+
 _mcp_health_cache = {
     "timestamp": 0.0,
     "reachable": True,
@@ -55,8 +66,7 @@ async def _background_health_probe_loop():
         mcp_reachable = True
         mcp_error = None
         try:
-            params = get_grafana_mcp_connection_params()
-            toolset = create_grafana_mcp_toolset(params)
+            toolset = await worker.get_toolset()
             res = await toolset._execute_with_session(
                 lambda session: session.call_tool("list_datasources", {}),
                 "List datasources health check"
@@ -169,6 +179,7 @@ async def health_check():
         "tick_cadence": worker.tick_cadence_stats,
         "watchdog_stalled": worker.watchdog_stalled,
         "watchdog_stalled_since": worker.watchdog_stalled_since,
+        "process_rss_mb": get_process_rss_mb(),
     }
     if mcp_error:
         data["mcp_error"] = mcp_error
@@ -353,7 +364,7 @@ async def get_mission_panel_png(mission_id: str):
         try:
             image_bytes = await mission_runner.render_panel_image(from_ms=from_ms, to_ms=to_ms)
             if image_bytes:
-                MISSION_PANEL_IMAGES[mission_id] = image_bytes
+                store_panel_image(mission_id, image_bytes)
         except Exception as ex:
             logger.warning("Dynamic panel render failed for mission %s: %s", mission_id, ex)
 
