@@ -2550,14 +2550,14 @@ State the technical root cause in 1 to 2 clear sentences, explaining how the har
 Generate an executive Callsheet delivery briefing covering the resolution of the dual thermal failure event:
 
 MOVE 1 (Tier 1 Autonomous Standby Failover):
-- Show: Chronicles of Aethelgard: Episode 6 (Client: HBO / Warner Bros. Discovery)
+- Show: Chronicles of Aethelgard: Episode 6 (Client: Cinefex Northern Pictures)
 - Shot: {t1_shot} (Seq 04, 240 frames remaining)
 - Failed Node: node-07 (quarantined)
 - Standby Node: {t1_node} (verified {t1_rate}s/frame, {t1_temp}C)
 - Restored Buffer Margin: {t1_margin}
 
 MOVE 2 (Tier 2 Producer Approved Cross-Show Pre-emption):
-- Show: Solar Flare: Redux (Client: Paramount Pictures)
+- Show: Solar Flare: Redux (Client: Solaris Media Works)
 - Shot: {t2_shot} (Seq 08, 180 frames remaining)
 - Failed Node: {approval.source_node_id} (quarantined)
 - Pre-empted Node: {t2_node} (originally rendering {t2_preempt_shot} for {t2_preempt_show})
@@ -2565,7 +2565,7 @@ MOVE 2 (Tier 2 Producer Approved Cross-Show Pre-emption):
 - Restored Buffer Margin: {t2_margin}
 
 PRE-EMPTED WORKLOAD STATUS:
-- Show: {t2_preempt_show} (Client: Universal Pictures)
+- Show: {t2_preempt_show} (Client: Submarine Post London)
 - Shot: {t2_preempt_shot} queued
 - Preserved Buffer Margin: +7.2 hours (well above 4.0h contractual delivery threshold)
 
